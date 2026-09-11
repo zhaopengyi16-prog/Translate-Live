@@ -20,7 +20,11 @@ namespace LiveCaptionsTranslator.models
 
     public sealed record TranslationHistoryChange(
         TranslationHistoryEntry Entry,
-        long? ReplacedEntryId);
+        long? ReplacedEntryId,
+        Guid? SegmentId = null,
+        long? Sequence = null,
+        int Revision = 0,
+        bool IsFinal = true);
 
     public sealed class LectureSessionEntry
     {

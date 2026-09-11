@@ -18,6 +18,9 @@ namespace LiveCaptionsTranslator.models
         private string overlayOriginalCaption = " ";
         private string overlayCurrentTranslation = " ";
         private string overlayNoticePrefix = " ";
+        private readonly Dictionary<long, Guid> contextSegmentIds = [];
+        private Guid? overlayCurrentSegmentId;
+        private int overlayCurrentRevision = -1;
 
         public string OriginalCaption { get; set; } = string.Empty;
         public string TranslatedCaption { get; set; } = string.Empty;
@@ -78,7 +81,10 @@ namespace LiveCaptionsTranslator.models
         }
 
         public string OverlayPreviousTranslation =>
-            GetPreviousText(Translator.Setting.DisplaySentences, TextType.Translation);
+            GetPreviousText(
+                Translator.Setting.DisplaySentences,
+                TextType.Translation,
+                overlayCurrentSegmentId);
 
         private Caption()
         {
@@ -94,10 +100,18 @@ namespace LiveCaptionsTranslator.models
 
         public string GetPreviousText(int count, TextType textType)
         {
+            return GetPreviousText(count, textType, excludedSegmentId: null);
+        }
+
+        private string GetPreviousText(
+            int count,
+            TextType textType,
+            Guid? excludedSegmentId)
+        {
             if (count <= 0)
                 return string.Empty;
 
-            var values = GetPreviousContexts(count)
+            var values = GetPreviousContexts(count, excludedSegmentId)
                 .Select(entry => textType == TextType.Caption
                     ? entry.SourceText
                     : entry.TranslatedText)
@@ -131,14 +145,29 @@ namespace LiveCaptionsTranslator.models
 
         public IEnumerable<TranslationHistoryEntry> GetPreviousContexts(int count)
         {
+            return GetPreviousContexts(count, excludedSegmentId: null);
+        }
+
+        private IEnumerable<TranslationHistoryEntry> GetPreviousContexts(
+            int count,
+            Guid? excludedSegmentId)
+        {
             if (count <= 0)
                 return [];
 
             TranslationHistoryEntry[] snapshot;
+            Dictionary<long, Guid> segmentIds;
             lock (Contexts)
+            {
                 snapshot = Contexts.ToArray();
+                segmentIds = new Dictionary<long, Guid>(contextSegmentIds);
+            }
 
             return snapshot
+                .Where(entry =>
+                    !excludedSegmentId.HasValue ||
+                    !segmentIds.TryGetValue(entry.Id, out Guid segmentId) ||
+                    segmentId != excludedSegmentId.Value)
                 .Reverse().Take(count).Reverse()
                 .Where(entry => entry != null && string.CompareOrdinal(entry.TranslatedText, "N/A") != 0 &&
                                 !entry.TranslatedText.Contains("[ERROR]") &&
@@ -148,7 +177,8 @@ namespace LiveCaptionsTranslator.models
 
         internal void UpsertContext(
             TranslationHistoryEntry entry,
-            long? replacedEntryId = null)
+            long? replacedEntryId = null,
+            Guid? segmentId = null)
         {
             lock (Contexts)
             {
@@ -158,19 +188,37 @@ namespace LiveCaptionsTranslator.models
                     : -1;
                 if (index < 0)
                     index = entries.FindIndex(item => item.Id == entry.Id);
+                if (index < 0 && segmentId.HasValue)
+                {
+                    index = entries.FindIndex(item =>
+                        contextSegmentIds.TryGetValue(item.Id, out Guid existingSegmentId) &&
+                        existingSegmentId == segmentId.Value);
+                }
                 if (index < 0 && entries.Count > 0 &&
+                    !segmentId.HasValue &&
                     CaptionRevisionPolicy.IsRevision(entries[^1].SourceText, entry.SourceText))
                 {
                     index = entries.Count - 1;
                 }
 
                 if (index >= 0)
+                {
+                    contextSegmentIds.Remove(entries[index].Id);
                     entries[index] = entry;
+                }
                 else
                     entries.Add(entry);
 
+                if (segmentId.HasValue)
+                    contextSegmentIds[entry.Id] = segmentId.Value;
+
                 if (entries.Count > MAX_CONTEXTS)
-                    entries.RemoveRange(0, entries.Count - MAX_CONTEXTS);
+                {
+                    int removeCount = entries.Count - MAX_CONTEXTS;
+                    foreach (TranslationHistoryEntry removed in entries.Take(removeCount))
+                        contextSegmentIds.Remove(removed.Id);
+                    entries.RemoveRange(0, removeCount);
+                }
 
                 Contexts.Clear();
                 foreach (TranslationHistoryEntry context in entries)
@@ -181,10 +229,51 @@ namespace LiveCaptionsTranslator.models
             OnPropertyChanged(nameof(OverlayPreviousTranslation));
         }
 
+        internal void BeginCurrentSegment(TranslationTaskIdentity identity)
+        {
+            if (overlayCurrentSegmentId == identity.SegmentId &&
+                overlayCurrentRevision >= identity.Revision)
+            {
+                return;
+            }
+
+            bool identityChanged = overlayCurrentSegmentId != identity.SegmentId;
+            overlayCurrentSegmentId = identity.SegmentId;
+            overlayCurrentRevision = identity.Revision;
+            OverlayCurrentTranslation = string.Empty;
+            if (identityChanged)
+                OnPropertyChanged(nameof(OverlayPreviousTranslation));
+        }
+
+        internal bool TryApplyCurrentTranslation(
+            TranslationTaskIdentity identity,
+            string translatedText)
+        {
+            if (overlayCurrentSegmentId != identity.SegmentId ||
+                overlayCurrentRevision != identity.Revision)
+            {
+                return false;
+            }
+
+            OverlayCurrentTranslation = translatedText;
+            return true;
+        }
+
+        internal void ClearCurrentSegment()
+        {
+            overlayCurrentSegmentId = null;
+            overlayCurrentRevision = -1;
+            OverlayCurrentTranslation = string.Empty;
+            OnPropertyChanged(nameof(OverlayPreviousTranslation));
+        }
+
         internal void ClearContextHistory()
         {
             lock (Contexts)
+            {
                 Contexts.Clear();
+                contextSegmentIds.Clear();
+            }
 
             OnPropertyChanged(nameof(DisplayLogCards));
             OnPropertyChanged(nameof(OverlayPreviousTranslation));

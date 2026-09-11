@@ -67,13 +67,29 @@ App startup
 Windows audio or microphone
   -> Windows Live Captions
   -> UI Automation capture
-  -> caption stabilization
-  -> translation task queue
+  -> position-aware caption stabilization
+  -> stable SessionId / SegmentId / Revision identity
+  -> revision-aware translation task queue
   -> selected provider
   -> workspace and overlay
   -> session-oriented SQLite history
   -> optional independent summary model
 ~~~
+
+### Subtitle-chain invariants
+
+- Recognition drafts, translation submissions, provider results, workspace rows, overlay text, and persisted records carry the same stable segment identity. A revision can update that segment in place; it cannot create a second utterance or overwrite a newer revision.
+- Each logical sentence fixes `CapturedAt` at first recognition. Revisions, provider completion, UI projection, and SQLite updates retain that value, while the stable recognition `Sequence` controls display order. Translation completion time is not used as the sentence timestamp.
+- Structured persistence is keyed by `(SessionId, SegmentId)`. A newer revision updates that row in place, a stale revision is rejected again at the storage boundary, and a classroom reset clears the in-memory identity map only after queued persistence has drained.
+- Text equality is not an identity rule. Repeated snapshots for one segment are idempotent, while two separately spoken but identical sentences keep distinct `SegmentId` values.
+- The rolling-window ledger retains at most 24 recent logical sentences for two minutes and up to four earlier text revisions per sentence. Position, neighboring sentence context, revision history, and the active draft distinguish forward append, correction, and old-window rollback. Time only evicts evidence; it never turns an identical snapshot into proof of new speech.
+- A long completed sentence may continue growing when Live Captions inserts temporary punctuation before speech has actually ended. Only at a position-confirmed current tail, the segmenter compares a punctuation-insensitive lexical prefix (at least five Latin words/24 characters, or eight CJK characters); this keeps comma and sentence-ending edits on the same identity without lowering the global revision threshold or merging merely similar sentences.
+- Recognition finalization, translation submission, and visual line wrapping are separate decisions. Closing punctuation belongs to its sentence; abbreviations, initials, decimals, version numbers, URLs, and truncated Live Captions windows are protected from eager finalization.
+- `LiveCaptionSegmentationThresholds.DraftQuietTranslationDelay` is currently 450 ms. It permits a stable draft to enter translation after a short measured pause; it does not mark that draft final or impose a fixed wait on already-final sentences.
+- Unpunctuated speech uses centrally defined 72/120/180-character minimum, preferred, and hard reading-unit boundaries. Commas, semicolons, colons, then word boundaries are preferred; CJK text falls back to a deterministic character boundary. The pieces retain all source text and stable sequence identity.
+- The timeline has explicit `FollowingLive`, `BrowsingHistory`, and `ReturningLive` states. Deferred follow requests recheck state before execution, and browsing preserves the first visible segment plus its viewport offset across translation and layout-height changes.
+
+Windows Live Captions does not expose a native sentence identifier. A single isolated sentence that is textually identical to a recent sentence can therefore be ambiguous when there is no draft growth, append position, or neighboring-window evidence. While bounded evidence exists, Translate Live treats that isolated frame as rollback; a repeated utterance is retained when a new draft grows or the rolling window explicitly appends it. This is a deliberate, documented trade-off rather than global text de-duplication.
 
 ## Source boundaries
 
@@ -120,7 +136,7 @@ Closing the app restores a pre-existing user-owned Live Captions window or termi
 
 WPF build operations must stay serial with `-m:1 -nodeReuse:false`. Dependency restoration must use the committed lock files.
 
-The current local baseline has 105 passing unit tests. Windows audio, microphone, UI Automation, and window-lifecycle behavior require a real desktop-session smoke test in addition to compilation.
+The current local baseline has 142 passing automated tests. The regression suite includes the production caption segmenter, revision-aware translation queue, stable-time UI projection, overlay context exclusion, punctuation-changing final growth, and isolated SQLite upsert behavior. The smoke-test executable also supports `--system-audio` for a fixed non-personal audio capture and `--timeline-ui` for the real WPF timeline control. Windows audio, microphone, UI Automation, and window-lifecycle behavior still require a real desktop-session smoke test in addition to compilation.
 
 ## Upstream and license
 

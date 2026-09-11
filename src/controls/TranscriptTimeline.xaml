@@ -44,10 +44,14 @@
             BorderThickness="0"
             ItemsSource="{Binding Segments}"
             ItemContainerStyle="{StaticResource TimelineListItemStyle}"
+            PreviewKeyDown="TimelineList_PreviewKeyDown"
+            PreviewMouseDown="TimelineList_PreviewMouseDown"
+            PreviewMouseWheel="TimelineList_PreviewMouseWheel"
             ScrollViewer.CanContentScroll="True"
             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
             ScrollViewer.ScrollChanged="TimelineScrollViewer_ScrollChanged"
             ScrollViewer.VerticalScrollBarVisibility="Auto"
+            SizeChanged="TimelineList_SizeChanged"
             VirtualizingPanel.IsVirtualizing="True"
             VirtualizingPanel.ScrollUnit="Pixel"
             VirtualizingPanel.VirtualizationMode="Recycling">
@@ -182,7 +186,9 @@
             Visibility="{Binding IsReturnToLiveVisible, Converter={StaticResource BooleanToVisibilityConverter}}" />
 
         <Border
+            x:Name="DraftPanel"
             Grid.Row="1"
+            MaxHeight="190"
             Margin="102,8,28,4"
             Padding="0,13,0,4"
             BorderBrush="{DynamicResource LectureDividerBrush}"
@@ -200,28 +206,34 @@
                     FontSize="14"
                     Foreground="{DynamicResource LectureTextSecondaryBrush}"
                     Text="•••" />
-                <StackPanel Grid.Column="1">
-                    <TextBlock
-                        FontSize="11.5"
-                        Foreground="{DynamicResource LectureTextTertiaryBrush}"
-                        Text="正在聆听" />
-                    <TextBlock
-                        Margin="0,4,0,0"
-                        FontFamily="{DynamicResource LectureUiFontFamily}"
-                        FontSize="{DynamicResource LectureSourceFontSize}"
-                        Foreground="{DynamicResource LectureTextSecondaryBrush}"
-                        Text="{Binding DraftText}"
-                        TextWrapping="Wrap" />
-                    <TextBlock
-                        Margin="0,5,0,0"
-                        FontFamily="{DynamicResource LectureUiFontFamily}"
-                        FontSize="{DynamicResource LectureSubtitleFontSize}"
-                        FontWeight="SemiBold"
-                        Foreground="{DynamicResource LectureTextPrimaryBrush}"
-                        Text="{Binding DraftTranslation}"
-                        TextWrapping="Wrap"
-                        Visibility="{Binding HasDraftTranslation, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                </StackPanel>
+                <ScrollViewer
+                    Grid.Column="1"
+                    HorizontalScrollBarVisibility="Disabled"
+                    PanningMode="VerticalOnly"
+                    VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="0,0,8,0">
+                        <TextBlock
+                            FontSize="11.5"
+                            Foreground="{DynamicResource LectureTextTertiaryBrush}"
+                            Text="正在聆听" />
+                        <TextBlock
+                            Margin="0,4,0,0"
+                            FontFamily="{DynamicResource LectureUiFontFamily}"
+                            FontSize="{DynamicResource LectureSourceFontSize}"
+                            Foreground="{DynamicResource LectureTextSecondaryBrush}"
+                            Text="{Binding DraftText}"
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            Margin="0,5,0,0"
+                            FontFamily="{DynamicResource LectureUiFontFamily}"
+                            FontSize="{DynamicResource LectureSubtitleFontSize}"
+                            FontWeight="SemiBold"
+                            Foreground="{DynamicResource LectureTextPrimaryBrush}"
+                            Text="{Binding DraftTranslation}"
+                            TextWrapping="Wrap"
+                            Visibility="{Binding HasDraftTranslation, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    </StackPanel>
+                </ScrollViewer>
             </Grid>
         </Border>
     </Grid>

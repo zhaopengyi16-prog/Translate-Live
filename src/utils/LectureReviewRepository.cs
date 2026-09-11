@@ -198,6 +198,58 @@ namespace LiveCaptionsTranslator.utils
             return await command.ExecuteNonQueryAsync(token) == 1;
         }
 
+        public async Task<TranslationHistoryEntry?> UpdateTranslationSnapshotAsync(
+            long entryId,
+            long? sessionId,
+            string sourceText,
+            string translatedText,
+            string targetLanguage,
+            string apiUsed,
+            CancellationToken token = default)
+        {
+            ValidateTranslationText(sourceText, translatedText);
+
+            await using var connection = OpenConnection();
+            await using var command = connection.CreateCommand();
+            command.CommandText = @"
+                UPDATE TranslationHistory
+                SET SourceText = @SourceText,
+                    TranslatedText = @TranslatedText,
+                    TargetLanguage = @TargetLanguage,
+                    ApiUsed = @ApiUsed
+                WHERE Id = @Id
+                  AND ((@SessionId IS NULL AND SessionId IS NULL) OR SessionId = @SessionId)
+                RETURNING Id, SessionId, Timestamp, SourceText, TranslatedText,
+                          TargetLanguage, ApiUsed;";
+            command.Parameters.AddWithValue("@Id", entryId);
+            command.Parameters.AddWithValue("@SessionId", (object?)sessionId ?? DBNull.Value);
+            command.Parameters.AddWithValue("@SourceText", sourceText.Trim());
+            command.Parameters.AddWithValue("@TranslatedText", translatedText.Trim());
+            command.Parameters.AddWithValue("@TargetLanguage", targetLanguage);
+            command.Parameters.AddWithValue("@ApiUsed", apiUsed);
+            await using var reader = await command.ExecuteReaderAsync(token);
+            if (!await reader.ReadAsync(token))
+                return null;
+
+            long unixTimestamp = Convert.ToInt64(
+                reader.GetValue(2),
+                System.Globalization.CultureInfo.InvariantCulture);
+            DateTime localTime = DateTimeOffset
+                .FromUnixTimeSeconds(unixTimestamp)
+                .LocalDateTime;
+            return new TranslationHistoryEntry
+            {
+                Id = reader.GetInt64(0),
+                SessionId = reader.IsDBNull(1) ? null : reader.GetInt64(1),
+                Timestamp = localTime.ToString("MM/dd HH:mm"),
+                TimestampFull = localTime.ToString("MM/dd/yy, HH:mm:ss"),
+                SourceText = reader.GetString(3),
+                TranslatedText = reader.GetString(4),
+                TargetLanguage = reader.GetString(5),
+                ApiUsed = reader.GetString(6)
+            };
+        }
+
         public async Task<bool> DeleteTranslationAsync(
             long entryId,
             long? sessionId,

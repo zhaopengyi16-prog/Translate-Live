@@ -12,16 +12,24 @@ namespace LiveCaptionsTranslator
 {
     public static class Translator
     {
+        private sealed record CaptionTranslationSubmission(
+            TranslationTaskIdentity Identity,
+            string Text);
+
         private static AutomationElement? window = null;
         private static Caption? caption = null;
         private static Setting? setting = null;
 
-        private static readonly System.Collections.Concurrent.ConcurrentQueue<string> pendingTextQueue = new();
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<CaptionTranslationSubmission>
+            pendingTextQueue = new();
         private static readonly TranslationTaskQueue translationTaskQueue =
             new(acceptedResultHandler: ApplyAcceptedContext);
         private static readonly LiveCaptionSegmenter captionSegmenter = new();
         private static readonly LiveCaptionsConnectionPolicy liveCaptionsConnectionPolicy = new();
         private static readonly SemaphoreSlim liveCaptionsConnectionGate = new(1, 1);
+        private static readonly TranslationSegmentPersistence segmentPersistence = new(
+            CreatePersistedSegmentAsync,
+            UpdatePersistedSegmentAsync);
         private static bool captureSuspended;
 
         public static AutomationElement? Window
@@ -54,6 +62,8 @@ namespace LiveCaptionsTranslator
 
         public static event Action? TranslationLogged;
         public static event Action<TranslationHistoryChange>? TranslationEntryLogged;
+        public static event Action<TranscriptSegment>? TranscriptSegmentChanged;
+        public static event Action<TranscriptSegment?>? TranscriptDraftChanged;
         public static event Action<bool>? LiveCaptionsConnectionChanged;
 
         static Translator()
@@ -164,6 +174,10 @@ namespace LiveCaptionsTranslator
         {
             int idleCount = 0;
             int syncCount = 0;
+            Guid? lastPublishedDraftId = null;
+            int lastPublishedDraftRevision = -1;
+            Guid? lastQueuedDraftId = null;
+            int lastQueuedDraftRevision = -1;
 
             while (!token.IsCancellationRequested)
             {
@@ -215,10 +229,13 @@ namespace LiveCaptionsTranslator
                 LiveCaptionUpdate update = captionSegmenter.Process(fullText);
 
                 string currentCaption = update.CurrentText;
-                if (currentCaption.Length > 0)
+                LiveCaptionSegment? currentSegment = update.CurrentSegment;
+                if (currentCaption.Length > 0 && currentSegment != null)
                 {
+                    var currentIdentity = ToIdentity(currentSegment);
+                    Caption.BeginCurrentSegment(currentIdentity);
                     Caption.OverlayOriginalCaption = TextUtil.ShortenDisplaySentence(
-                        update.NormalizedText,
+                        currentCaption,
                         TextUtil.VERYLONG_THRESHOLD);
                     if (!string.Equals(
                             Caption.DisplayOriginalCaption,
@@ -233,16 +250,44 @@ namespace LiveCaptionsTranslator
 
                 // A final sentence is queued exactly once. In particular, an idle
                 // timer must not submit the same completed sentence again.
-                foreach (string finalizedSentence in update.FinalizedSentences)
+                foreach (LiveCaptionSegment finalizedSegment in update.FinalizedSegments)
                 {
-                    Caption.OriginalCaption = finalizedSentence;
-                    pendingTextQueue.Enqueue(finalizedSentence);
+                    Caption.OriginalCaption = finalizedSegment.Text;
+                    var identity = ToIdentity(finalizedSegment);
+                    pendingTextQueue.Enqueue(new CaptionTranslationSubmission(
+                        identity,
+                        finalizedSegment.Text));
+                    TranscriptSegmentChanged?.Invoke(ToTranscriptSegment(
+                        finalizedSegment,
+                        translatedText: null,
+                        SegmentState.Committed));
                     syncCount = 0;
                     idleCount = 0;
                 }
 
-                string draft = update.DraftText;
-                if (draft.Length > 0 && update.DraftIsEligible)
+                LiveCaptionSegment? draftSegment = update.DraftSegment;
+                string draft = draftSegment?.Text ?? string.Empty;
+                if (draftSegment != null)
+                {
+                    if (lastPublishedDraftId != draftSegment.Id ||
+                        lastPublishedDraftRevision != draftSegment.Revision)
+                    {
+                        TranscriptDraftChanged?.Invoke(ToTranscriptSegment(
+                            draftSegment,
+                            translatedText: null,
+                            SegmentState.Draft));
+                        lastPublishedDraftId = draftSegment.Id;
+                        lastPublishedDraftRevision = draftSegment.Revision;
+                    }
+                }
+                else if (lastPublishedDraftId.HasValue)
+                {
+                    TranscriptDraftChanged?.Invoke(null);
+                    lastPublishedDraftId = null;
+                    lastPublishedDraftRevision = -1;
+                }
+
+                if (draftSegment != null && update.DraftIsEligible)
                 {
                     bool draftIsLongEnough =
                         Encoding.UTF8.GetByteCount(draft) >= TextUtil.SHORT_THRESHOLD;
@@ -266,10 +311,17 @@ namespace LiveCaptionsTranslator
                     // wait for more speech or final punctuation.
                     if (draftIsLongEnough &&
                         (syncCount > Setting.MaxSyncInterval ||
-                         idleCount == Setting.MaxIdleInterval))
+                         idleCount == Setting.MaxIdleInterval ||
+                         update.DraftStableFor >=
+                            LiveCaptionSegmentationThresholds.DraftQuietTranslationDelay) &&
+                        (lastQueuedDraftId != draftSegment.Id ||
+                         lastQueuedDraftRevision != draftSegment.Revision))
                     {
                         syncCount = 0;
-                        pendingTextQueue.Enqueue(draft);
+                        var identity = ToIdentity(draftSegment);
+                        pendingTextQueue.Enqueue(new CaptionTranslationSubmission(identity, draft));
+                        lastQueuedDraftId = draftSegment.Id;
+                        lastQueuedDraftRevision = draftSegment.Revision;
                     }
                 }
                 else
@@ -292,15 +344,19 @@ namespace LiveCaptionsTranslator
                 // Drain all captured revisions without adding another polling delay.
                 // TranslationTaskQueue keeps distinct sentences and collapses stale revisions.
                 bool processedAny = false;
-                while (pendingTextQueue.TryDequeue(out var originalSnapshot))
+                while (pendingTextQueue.TryDequeue(out CaptionTranslationSubmission? submission))
                 {
                     processedAny = true;
-                    string queuedText = originalSnapshot;
+                    string queuedText = submission.Text;
                     if (LogOnlyFlag)
                     {
                         long? sessionId = LectureSessionTracker.CurrentSessionId;
-                        bool isOverwrite = await IsOverwrite(queuedText, sessionId, token);
-                        await LogOnly(queuedText, isOverwrite, sessionId, token);
+                        await LogOnly(
+                            queuedText,
+                            isOverwrite: false,
+                            sessionId: sessionId,
+                            token: token,
+                            identity: submission.Identity);
                     }
                     else
                     {
@@ -320,6 +376,7 @@ namespace LiveCaptionsTranslator
                             apiName,
                             sessionId,
                             targetLanguage,
+                            submission.Identity,
                             token);
                     }
                 }
@@ -335,8 +392,9 @@ namespace LiveCaptionsTranslator
         {
             while (!token.IsCancellationRequested)
             {
-                var (translatedText, _) =
-                    await translationTaskQueue.ReadLatestOutputAsync(token);
+                TranslationQueueResult result =
+                    await translationTaskQueue.ReadLatestResultAsync(token);
+                string translatedText = result.TranslatedText;
 
                 if (LogOnlyFlag)
                 {
@@ -346,26 +404,41 @@ namespace LiveCaptionsTranslator
                     Caption.OverlayCurrentTranslation = string.Empty;
                 }
                 else if (!string.IsNullOrEmpty(RegexPatterns.NoticePrefix().Replace(
-                             translatedText, string.Empty).Trim()) &&
-                         (string.CompareOrdinal(Caption.TranslatedCaption, translatedText) != 0 ||
-                          string.Equals(
-                              Caption.DisplayTranslatedCaption,
-                              "[Paused]",
-                              StringComparison.Ordinal)))
+                             translatedText, string.Empty).Trim()))
                 {
-                    // Main page
-                    Caption.TranslatedCaption = translatedText;
-                    Caption.DisplayTranslatedCaption =
-                        TextUtil.ShortenDisplaySentence(Caption.TranslatedCaption, TextUtil.VERYLONG_THRESHOLD);
+                    PublishTranscriptResult(result);
 
-                    // Overlay window
-                    if (Caption.TranslatedCaption.Contains("[ERROR]") || Caption.TranslatedCaption.Contains("[WARNING]"))
-                        Caption.OverlayCurrentTranslation = Caption.TranslatedCaption;
+                    string noticePrefix = string.Empty;
+                    string overlayTranslation;
+                    if (translatedText.Contains("[ERROR]") ||
+                        translatedText.Contains("[WARNING]"))
+                    {
+                        overlayTranslation = translatedText;
+                    }
                     else
                     {
-                        var match = RegexPatterns.NoticePrefixAndTranslation().Match(Caption.TranslatedCaption);
-                        Caption.OverlayNoticePrefix = match.Groups[1].Value.Trim();
-                        Caption.OverlayCurrentTranslation = match.Groups[2].Value.Trim();
+                        var match = RegexPatterns.NoticePrefixAndTranslation().Match(translatedText);
+                        noticePrefix = match.Groups[1].Value.Trim();
+                        overlayTranslation = match.Groups[2].Value.Trim();
+                    }
+
+                    bool appliesToCurrent = result.Identity == null;
+                    if (result.Identity != null)
+                    {
+                        appliesToCurrent = Caption.TryApplyCurrentTranslation(
+                            result.Identity,
+                            overlayTranslation);
+                    }
+
+                    if (appliesToCurrent)
+                    {
+                        Caption.TranslatedCaption = translatedText;
+                        Caption.DisplayTranslatedCaption = TextUtil.ShortenDisplaySentence(
+                            translatedText,
+                            TextUtil.VERYLONG_THRESHOLD);
+                        Caption.OverlayNoticePrefix = noticePrefix;
+                        if (result.Identity == null)
+                            Caption.OverlayCurrentTranslation = overlayTranslation;
                     }
                 }
                 else if (string.Equals(
@@ -486,9 +559,65 @@ namespace LiveCaptionsTranslator
             return (translatedText, isChoke);
         }
 
+        private static void PublishTranscriptResult(TranslationQueueResult result)
+        {
+            TranslationTaskIdentity? identity = result.Identity;
+            if (identity == null)
+                return;
+
+            bool failed = result.TranslatedText.Contains(
+                "[ERROR]",
+                StringComparison.OrdinalIgnoreCase);
+            var segment = new TranscriptSegment(
+                identity.SegmentId,
+                identity.Sequence,
+                identity.Revision,
+                result.OriginalText,
+                failed ? null : result.TranslatedText,
+                identity.IsFinal
+                    ? result.IsPartial
+                        ? SegmentState.Translating
+                        : failed
+                            ? SegmentState.TranslationFailed
+                            : SegmentState.Translated
+                    : SegmentState.Draft,
+                identity.CapturedAt);
+
+            if (identity.IsFinal)
+                TranscriptSegmentChanged?.Invoke(segment);
+            else
+                TranscriptDraftChanged?.Invoke(segment);
+        }
+
+        private static TranslationTaskIdentity ToIdentity(LiveCaptionSegment segment)
+        {
+            return new TranslationTaskIdentity(
+                segment.Id,
+                segment.Sequence,
+                segment.Revision,
+                segment.IsFinal,
+                segment.CapturedAt);
+        }
+
+        private static TranscriptSegment ToTranscriptSegment(
+            LiveCaptionSegment segment,
+            string? translatedText,
+            SegmentState state)
+        {
+            return new TranscriptSegment(
+                segment.Id,
+                segment.Sequence,
+                segment.Revision,
+                segment.Text,
+                translatedText,
+                state,
+                segment.CapturedAt);
+        }
+
         public static async Task<TranslationHistoryChange?> Log(string originalText, string translatedText,
             bool isOverwrite = false, string? apiName = null, long? sessionId = null,
-            CancellationToken token = default, string? targetLanguageSnapshot = null)
+            CancellationToken token = default, string? targetLanguageSnapshot = null,
+            TranslationTaskIdentity? identity = null)
         {
             string targetLanguage, resolvedApiName;
             if (Setting != null)
@@ -505,11 +634,47 @@ namespace LiveCaptionsTranslator
             try
             {
                 long? replacedEntryId = null;
-                if (isOverwrite)
-                    replacedEntryId = await SQLiteHistoryLogger.DeleteLastTranslation(sessionId, token);
-                var entry = await SQLiteHistoryLogger.LogTranslation(
-                    originalText, translatedText, targetLanguage, resolvedApiName, sessionId, token);
-                var change = new TranslationHistoryChange(entry, replacedEntryId);
+                TranslationHistoryEntry? entry = null;
+                if (identity != null && sessionId.HasValue)
+                {
+                    TranslationPersistenceResult persistenceResult =
+                        await segmentPersistence.UpsertAsync(
+                            new TranslationPersistenceRequest(
+                                sessionId.Value,
+                                identity,
+                                originalText,
+                                translatedText,
+                                targetLanguage,
+                                resolvedApiName),
+                            token);
+                    if (!persistenceResult.Applied)
+                        return null;
+                    entry = persistenceResult.Entry;
+                }
+                else
+                {
+                    if (isOverwrite)
+                    {
+                        replacedEntryId = await SQLiteHistoryLogger.DeleteLastTranslation(
+                            sessionId,
+                            token);
+                    }
+                    entry = await SQLiteHistoryLogger.LogTranslation(
+                        originalText,
+                        translatedText,
+                        targetLanguage,
+                        resolvedApiName,
+                        sessionId,
+                        token);
+                }
+
+                var change = new TranslationHistoryChange(
+                    entry,
+                    replacedEntryId,
+                    identity?.SegmentId,
+                    identity?.Sequence,
+                    identity?.Revision ?? 0,
+                    identity?.IsFinal ?? true);
                 TranslationEntryLogged?.Invoke(change);
                 TranslationLogged?.Invoke();
                 return change;
@@ -528,17 +693,20 @@ namespace LiveCaptionsTranslator
 
         public static async Task LogOnly(string originalText,
             bool isOverwrite = false, long? sessionId = null,
-            CancellationToken token = default)
+            CancellationToken token = default,
+            TranslationTaskIdentity? identity = null)
         {
             try
             {
-                long? replacedEntryId = null;
-                if (isOverwrite)
-                    replacedEntryId = await SQLiteHistoryLogger.DeleteLastTranslation(sessionId, token);
-                var entry = await SQLiteHistoryLogger.LogTranslation(
-                    originalText, "N/A", "N/A", "LogOnly", sessionId, token);
-                TranslationEntryLogged?.Invoke(new TranslationHistoryChange(entry, replacedEntryId));
-                TranslationLogged?.Invoke();
+                await Log(
+                    originalText,
+                    "N/A",
+                    isOverwrite,
+                    "LogOnly",
+                    sessionId,
+                    token,
+                    "N/A",
+                    identity);
             }
             catch (OperationCanceledException)
             {
@@ -561,7 +729,10 @@ namespace LiveCaptionsTranslator
 
         internal static void ApplyLoggedContext(TranslationHistoryChange change)
         {
-            Caption?.UpsertContext(change.Entry, change.ReplacedEntryId);
+            Caption?.UpsertContext(
+                change.Entry,
+                change.ReplacedEntryId,
+                change.SegmentId);
         }
 
         private static long transientContextId;
@@ -575,7 +746,7 @@ namespace LiveCaptionsTranslator
                 return;
             }
 
-            DateTime localTime = DateTime.Now;
+            DateTime localTime = result.Identity?.CapturedAt.LocalDateTime ?? DateTime.Now;
             Caption?.UpsertContext(new TranslationHistoryEntry
             {
                 Id = Interlocked.Decrement(ref transientContextId),
@@ -586,7 +757,7 @@ namespace LiveCaptionsTranslator
                 TranslatedText = result.TranslatedText,
                 TargetLanguage = result.TargetLanguage,
                 ApiUsed = result.ApiName
-            });
+            }, segmentId: result.Identity?.SegmentId);
         }
 
         public static void ClearContexts()
@@ -603,9 +774,11 @@ namespace LiveCaptionsTranslator
             {
             }
             await translationTaskQueue.WaitForPersistenceAsync().WaitAsync(token);
+            await segmentPersistence.ClearAsync(token);
             ClearContexts();
             if (Caption != null)
             {
+                Caption.ClearCurrentSegment();
                 Caption.OriginalCaption = string.Empty;
                 Caption.TranslatedCaption = string.Empty;
                 Caption.DisplayOriginalCaption = string.Empty;
@@ -623,6 +796,35 @@ namespace LiveCaptionsTranslator
             // replayed into the new class.
             captionSegmenter.Reset();
             Volatile.Write(ref captureSuspended, false);
+        }
+
+        private static Task<TranslationHistoryEntry> CreatePersistedSegmentAsync(
+            TranslationPersistenceRequest request,
+            CancellationToken token)
+        {
+            return SQLiteHistoryLogger.LogTranslation(
+                request.SourceText,
+                request.TranslatedText,
+                request.TargetLanguage,
+                request.ApiName,
+                request.SessionId,
+                token,
+                request.Identity.CapturedAt);
+        }
+
+        private static Task<TranslationHistoryEntry?> UpdatePersistedSegmentAsync(
+            long entryId,
+            TranslationPersistenceRequest request,
+            CancellationToken token)
+        {
+            return SQLiteHistoryLogger.UpdateLoggedTranslationAsync(
+                entryId,
+                request.SessionId,
+                request.SourceText,
+                request.TranslatedText,
+                request.TargetLanguage,
+                request.ApiName,
+                token);
         }
 
         // If this text is too similar to the last one, overwrite it when logging.

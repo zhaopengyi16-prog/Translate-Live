@@ -18,6 +18,7 @@ namespace LiveCaptionsTranslator.viewmodels
         private readonly Dictionary<Guid, TranscriptSegmentViewModel> segmentsById = [];
         private string draftText = string.Empty;
         private string draftTranslation = string.Empty;
+        private TranscriptSegment? draftSegment;
         private TimelineFollowState followState = TimelineFollowState.FollowingLive;
         private int pendingSegmentCount;
         private string sessionStatus = "正在准备 Windows 实时字幕";
@@ -66,7 +67,10 @@ namespace LiveCaptionsTranslator.viewmodels
         public TimelineFollowState FollowState => followState;
         public bool IsFollowingLive => followState == TimelineFollowState.FollowingLive;
         public bool IsBrowsingHistory => followState == TimelineFollowState.BrowsingHistory;
-        public bool IsReturnToLiveVisible => IsBrowsingHistory && PendingSegmentCount > 0;
+        public bool IsReturnToLiveVisible =>
+            followState is TimelineFollowState.BrowsingHistory or TimelineFollowState.ReturningLive;
+        public Guid? DraftSegmentId => draftSegment?.Id;
+        public int DraftRevision => draftSegment?.Revision ?? -1;
 
         public int PendingSegmentCount
         {
@@ -196,7 +200,14 @@ namespace LiveCaptionsTranslator.viewmodels
         {
             if (segmentsById.TryGetValue(segment.Id, out var existing))
             {
-                existing.Apply(segment);
+                // Segment identity also owns its recognition position and first
+                // capture time. Translation completion and later revisions may
+                // update content/state but must not move the sentence in history.
+                existing.Apply(segment with
+                {
+                    Sequence = existing.Sequence,
+                    CapturedAt = existing.CapturedAt
+                });
                 return;
             }
 
@@ -235,19 +246,63 @@ namespace LiveCaptionsTranslator.viewmodels
 
         public void SetDraft(TranscriptSegment? draft)
         {
-            DraftText = draft?.SourceText ?? string.Empty;
+            if (draft == null)
+            {
+                draftSegment = null;
+                DraftText = string.Empty;
+                DraftTranslation = string.Empty;
+                OnPropertyChanged(nameof(DraftSegmentId));
+                OnPropertyChanged(nameof(DraftRevision));
+                return;
+            }
+
+            if (draftSegment?.Id == draft.Id && draft.Revision < draftSegment.Revision)
+                return;
+
+            bool identityChanged = draftSegment?.Id != draft.Id;
+            bool revisionChanged = draftSegment?.Revision != draft.Revision;
+            draftSegment = draft;
+            DraftText = draft.SourceText.Trim();
+            if (identityChanged || revisionChanged || draft.TranslatedText != null)
+                DraftTranslation = draft.TranslatedText?.Trim() ?? string.Empty;
+            OnPropertyChanged(nameof(DraftSegmentId));
+            OnPropertyChanged(nameof(DraftRevision));
         }
 
         public void SetDraft(string? text)
         {
+            draftSegment = null;
             DraftText = text?.Trim() ?? string.Empty;
             if (DraftText.Length == 0)
                 DraftTranslation = string.Empty;
+            OnPropertyChanged(nameof(DraftSegmentId));
+            OnPropertyChanged(nameof(DraftRevision));
         }
 
         public void SetDraftTranslation(string? text)
         {
             DraftTranslation = text?.Trim() ?? string.Empty;
+        }
+
+        public bool SetDraftTranslation(
+            Guid segmentId,
+            int revision,
+            string? text)
+        {
+            if (draftSegment?.Id != segmentId || draftSegment.Revision != revision)
+                return false;
+
+            DraftTranslation = text?.Trim() ?? string.Empty;
+            return true;
+        }
+
+        public bool ClearDraft(Guid segmentId, int finalRevision)
+        {
+            if (draftSegment?.Id != segmentId || draftSegment.Revision > finalRevision)
+                return false;
+
+            SetDraft((TranscriptSegment?)null);
+            return true;
         }
 
         public void BeginBrowsingHistory()
@@ -278,6 +333,9 @@ namespace LiveCaptionsTranslator.viewmodels
             segmentsById.Clear();
             DraftText = string.Empty;
             DraftTranslation = string.Empty;
+            draftSegment = null;
+            OnPropertyChanged(nameof(DraftSegmentId));
+            OnPropertyChanged(nameof(DraftRevision));
             followState = TimelineFollowState.FollowingLive;
             PendingSegmentCount = 0;
             RaiseFollowStateProperties();

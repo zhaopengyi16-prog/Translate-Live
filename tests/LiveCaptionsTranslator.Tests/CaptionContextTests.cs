@@ -32,6 +32,49 @@ namespace LiveCaptionsTranslator.Tests
             }
         }
 
+        [TestMethod]
+        public void OverlayDoesNotRepeatTheCurrentAcceptedTranslation()
+        {
+            Caption caption = Caption.GetInstance();
+            caption.ClearContextHistory();
+            var identity = new TranslationTaskIdentity(
+                Guid.NewGuid(),
+                1,
+                0,
+                true,
+                DateTimeOffset.UtcNow);
+            caption.BeginCurrentSegment(identity);
+            caption.TryApplyCurrentTranslation(identity, "当前译文。");
+
+            try
+            {
+                caption.UpsertContext(
+                    Entry(1, "Current sentence.", "当前译文。"),
+                    segmentId: identity.SegmentId);
+
+                string visible = caption.OverlayPreviousTranslation +
+                                 caption.OverlayCurrentTranslation;
+                Assert.AreEqual(1, CountOccurrences(visible, "当前译文。"));
+            }
+            finally
+            {
+                caption.ClearCurrentSegment();
+                caption.ClearContextHistory();
+            }
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            int count = 0;
+            int index = 0;
+            while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += value.Length;
+            }
+            return count;
+        }
+
         private static TranslationHistoryEntry Entry(
             long id,
             string source,

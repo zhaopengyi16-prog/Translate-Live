@@ -5,13 +5,22 @@ using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator.models
 {
+    public sealed record TranslationTaskIdentity(
+        Guid SegmentId,
+        long Sequence,
+        int Revision,
+        bool IsFinal,
+        DateTimeOffset CapturedAt);
+
     public sealed record TranslationQueueResult(
         string OriginalText,
         string TranslatedText,
         bool IsComplete,
         string ApiName,
         long? SessionId,
-        string TargetLanguage);
+        string TargetLanguage,
+        TranslationTaskIdentity? Identity = null,
+        bool IsPartial = false);
 
     public class TranslationTaskQueue
     {
@@ -21,8 +30,8 @@ namespace LiveCaptionsTranslator.models
         private readonly LinkedList<TranslationTask> pendingTasks = new();
         private readonly Func<TranslationQueueResult, CancellationToken, Task> persistenceHandler;
         private readonly Action<TranslationQueueResult>? acceptedResultHandler;
-        private readonly Channel<(string translatedText, bool isChoke)> outputChannel =
-            Channel.CreateBounded<(string translatedText, bool isChoke)>(
+        private readonly Channel<TranslationQueueResult> outputChannel =
+            Channel.CreateBounded<TranslationQueueResult>(
                 new BoundedChannelOptions(1)
                 {
                     SingleReader = true,
@@ -34,6 +43,7 @@ namespace LiveCaptionsTranslator.models
         private TranslationTask? activeTask;
         private Task persistenceTail = Task.CompletedTask;
         private (string translatedText, bool isChoke) output;
+        private TranslationQueueResult? latestResult;
 
         public (string translatedText, bool isChoke) Output
         {
@@ -107,7 +117,37 @@ namespace LiveCaptionsTranslator.models
                 targetLanguage,
                 parentToken,
                 waitForPersistence,
-                CancellationTokenSource.CreateLinkedTokenSource(parentToken));
+                CancellationTokenSource.CreateLinkedTokenSource(parentToken),
+                identity: null);
+            Enqueue(newTask);
+        }
+
+        public void Enqueue(
+            Func<CancellationToken, Action<string>, Task<(string, bool)>> worker,
+            string originalText,
+            string apiName,
+            long? sessionId,
+            string targetLanguage,
+            TranslationTaskIdentity identity,
+            CancellationToken parentToken = default,
+            bool waitForPersistence = false)
+        {
+            ArgumentNullException.ThrowIfNull(identity);
+            var newTask = new TranslationTask(
+                worker,
+                originalText,
+                apiName,
+                sessionId,
+                targetLanguage,
+                parentToken,
+                waitForPersistence,
+                CancellationTokenSource.CreateLinkedTokenSource(parentToken),
+                identity);
+            Enqueue(newTask);
+        }
+
+        private void Enqueue(TranslationTask newTask)
+        {
             TranslationTask? taskToStart = null;
 
             lock (queueLock)
@@ -151,15 +191,33 @@ namespace LiveCaptionsTranslator.models
         public async ValueTask<(string translatedText, bool isChoke)> ReadLatestOutputAsync(
             CancellationToken token = default)
         {
-            var latest = await outputChannel.Reader.ReadAsync(token);
-            while (outputChannel.Reader.TryRead(out var newer))
+            TranslationQueueResult latest = await ReadLatestResultAsync(token);
+            return (latest.TranslatedText, latest.IsComplete);
+        }
+
+        public async ValueTask<TranslationQueueResult> ReadLatestResultAsync(
+            CancellationToken token = default)
+        {
+            TranslationQueueResult latest = await outputChannel.Reader.ReadAsync(token);
+            while (outputChannel.Reader.TryRead(out TranslationQueueResult? newer))
                 latest = newer;
             return latest;
         }
 
         public void SignalOutput()
         {
-            outputChannel.Writer.TryWrite(Output);
+            TranslationQueueResult? result;
+            lock (queueLock)
+            {
+                result = latestResult ?? new TranslationQueueResult(
+                    string.Empty,
+                    output.translatedText,
+                    output.isChoke,
+                    string.Empty,
+                    null,
+                    string.Empty);
+            }
+            outputChannel.Writer.TryWrite(result);
         }
 
         public Task WaitForPersistenceAsync()
@@ -177,16 +235,33 @@ namespace LiveCaptionsTranslator.models
                     pending.CancelAndDispose();
                 pendingTasks.Clear();
                 output = (string.Empty, false);
+                latestResult = null;
             }
 
             while (outputChannel.Reader.TryRead(out _))
             {
             }
-            outputChannel.Writer.TryWrite((string.Empty, false));
         }
 
         private static bool IsDuplicate(TranslationTask queuedTask, TranslationTask newTask)
         {
+            if (queuedTask.Identity != null || newTask.Identity != null)
+            {
+                return queuedTask.Identity != null &&
+                       newTask.Identity != null &&
+                       queuedTask.Identity.SegmentId == newTask.Identity.SegmentId &&
+                       queuedTask.Identity.Revision == newTask.Identity.Revision &&
+                       queuedTask.Identity.IsFinal == newTask.Identity.IsFinal &&
+                       string.Equals(
+                           queuedTask.ApiName,
+                           newTask.ApiName,
+                           StringComparison.Ordinal) &&
+                       string.Equals(
+                           queuedTask.TargetLanguage,
+                           newTask.TargetLanguage,
+                           StringComparison.Ordinal);
+            }
+
             return string.Equals(queuedTask.ApiName, newTask.ApiName, StringComparison.Ordinal) &&
                    queuedTask.SessionId == newTask.SessionId &&
                    string.Equals(
@@ -208,16 +283,23 @@ namespace LiveCaptionsTranslator.models
                 return false;
             }
 
-            if (IsComplete(active.OriginalText))
+            bool activeIsFinal = active.Identity?.IsFinal ?? IsComplete(active.OriginalText);
+            bool replacementIsFinal = replacement.Identity?.IsFinal ??
+                                      IsComplete(replacement.OriginalText);
+            if (activeIsFinal)
             {
-                return IsComplete(replacement.OriginalText) &&
-                       CaptionRevisionPolicy.IsGrowingFinalRevision(
-                           active.OriginalText,
-                           replacement.OriginalText);
+                return replacementIsFinal &&
+                       (active.Identity != null ||
+                        CaptionRevisionPolicy.IsGrowingFinalRevision(
+                            active.OriginalText,
+                            replacement.OriginalText));
             }
 
-            if (IsComplete(replacement.OriginalText))
+            if (replacementIsFinal)
                 return true;
+
+            if (active.Identity != null && replacement.Identity != null)
+                return replacement.Identity.Revision > active.Identity.Revision;
 
             int growth = System.Text.Encoding.UTF8.GetByteCount(replacement.OriginalText) -
                          System.Text.Encoding.UTF8.GetByteCount(active.OriginalText);
@@ -241,6 +323,14 @@ namespace LiveCaptionsTranslator.models
                 string.IsNullOrWhiteSpace(newTask.OriginalText))
             {
                 return false;
+            }
+
+            if (queuedTask.Identity != null || newTask.Identity != null)
+            {
+                return queuedTask.Identity != null &&
+                       newTask.Identity != null &&
+                       queuedTask.Identity.SegmentId == newTask.Identity.SegmentId &&
+                       newTask.Identity.Revision >= queuedTask.Identity.Revision;
             }
 
             return CaptionRevisionPolicy.IsRevision(
@@ -302,13 +392,15 @@ namespace LiveCaptionsTranslator.models
                 if (translationTask.CTS.IsCancellationRequested)
                     return;
 
+                bool isComplete = translationTask.Identity?.IsFinal ?? result.isChoke;
                 var completion = new TranslationQueueResult(
                     translationTask.OriginalText,
                     result.translatedText,
-                    result.isChoke,
+                    isComplete,
                     translationTask.ApiName,
                     translationTask.SessionId,
-                    translationTask.TargetLanguage);
+                    translationTask.TargetLanguage,
+                    translationTask.Identity);
                 if (!TryPublishOutput(translationTask, result))
                     return;
 
@@ -338,7 +430,7 @@ namespace LiveCaptionsTranslator.models
             if (string.IsNullOrWhiteSpace(partialText))
                 return;
 
-            var partial = (partialText, false);
+            TranslationQueueResult partial;
             lock (queueLock)
             {
                 if (translationTask.CTS.IsCancellationRequested ||
@@ -348,7 +440,17 @@ namespace LiveCaptionsTranslator.models
                     return;
                 }
 
-                output = partial;
+                partial = new TranslationQueueResult(
+                    translationTask.OriginalText,
+                    partialText,
+                    translationTask.Identity?.IsFinal ?? false,
+                    translationTask.ApiName,
+                    translationTask.SessionId,
+                    translationTask.TargetLanguage,
+                    translationTask.Identity,
+                    IsPartial: true);
+                output = (partialText, false);
+                latestResult = partial;
             }
             outputChannel.Writer.TryWrite(partial);
         }
@@ -357,6 +459,7 @@ namespace LiveCaptionsTranslator.models
             TranslationTask translationTask,
             (string translatedText, bool isChoke) result)
         {
+            TranslationQueueResult published;
             lock (queueLock)
             {
                 if (translationTask.CTS.IsCancellationRequested ||
@@ -374,8 +477,17 @@ namespace LiveCaptionsTranslator.models
                 }
 
                 output = result;
+                published = new TranslationQueueResult(
+                    translationTask.OriginalText,
+                    result.translatedText,
+                    translationTask.Identity?.IsFinal ?? result.isChoke,
+                    translationTask.ApiName,
+                    translationTask.SessionId,
+                    translationTask.TargetLanguage,
+                    translationTask.Identity);
+                latestResult = published;
             }
-            outputChannel.Writer.TryWrite(result);
+            outputChannel.Writer.TryWrite(published);
             return true;
         }
 
@@ -420,10 +532,11 @@ namespace LiveCaptionsTranslator.models
             if (!result.SessionId.HasValue)
                 return;
 
-            bool isOverwrite = await Translator.IsOverwrite(
-                result.OriginalText,
-                result.SessionId,
-                token);
+            bool isOverwrite = result.Identity == null &&
+                               await Translator.IsOverwrite(
+                                   result.OriginalText,
+                                   result.SessionId,
+                                   token);
             TranslationHistoryChange? change = await Translator.Log(
                 result.OriginalText,
                 result.TranslatedText,
@@ -431,7 +544,8 @@ namespace LiveCaptionsTranslator.models
                 result.ApiName,
                 result.SessionId,
                 token,
-                result.TargetLanguage);
+                result.TargetLanguage,
+                result.Identity);
             if (result.IsComplete && change != null)
                 Translator.ApplyLoggedContext(change);
         }
@@ -481,6 +595,7 @@ namespace LiveCaptionsTranslator.models
         public string ApiName { get; }
         public long? SessionId { get; }
         public string TargetLanguage { get; }
+        public TranslationTaskIdentity? Identity { get; }
         public CancellationToken PersistenceToken { get; }
         public bool WaitForPersistence { get; }
         public CancellationTokenSource CTS { get; }
@@ -493,13 +608,15 @@ namespace LiveCaptionsTranslator.models
             string targetLanguage,
             CancellationToken persistenceToken,
             bool waitForPersistence,
-            CancellationTokenSource cts)
+            CancellationTokenSource cts,
+            TranslationTaskIdentity? identity)
         {
             Worker = worker;
             OriginalText = originalText;
             ApiName = apiName;
             SessionId = sessionId;
             TargetLanguage = targetLanguage;
+            Identity = identity;
             PersistenceToken = persistenceToken;
             WaitForPersistence = waitForPersistence;
             CTS = cts;

@@ -21,6 +21,7 @@ namespace LiveCaptionsTranslator
             Interval = TimeSpan.FromSeconds(1)
         };
         private readonly HashSet<long> loadedEntryIds = [];
+        private readonly Dictionary<long, Guid> loadedSegmentIds = [];
         private readonly List<TranslationHistoryChange> pendingHistoryChanges = [];
         private readonly object historyProjectionLock = new();
         private readonly SemaphoreSlim modeTransitionGate = new(1, 1);
@@ -77,8 +78,8 @@ namespace LiveCaptionsTranslator
 
             initialized = true;
             Translator.TranslationEntryLogged += OnTranslationEntryLogged;
-            if (Translator.Caption != null)
-                Translator.Caption.PropertyChanged += Caption_PropertyChanged;
+            Translator.TranscriptSegmentChanged += OnTranscriptSegmentChanged;
+            Translator.TranscriptDraftChanged += OnTranscriptDraftChanged;
 
             viewModel.LiveCaptionsStatus = Translator.Window == null
                 ? "Live Captions 未连接"
@@ -273,41 +274,55 @@ namespace LiveCaptionsTranslator
             ownerWindow?.ToggleOverlay();
         }
 
-        private void Caption_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        private void OnTranscriptDraftChanged(TranscriptSegment? draft)
         {
             if (viewModel.IsDemoRunning)
                 return;
 
-            if (e.PropertyName == nameof(Caption.DisplayOriginalCaption))
+            Dispatcher.BeginInvoke(new Action(() =>
             {
-                string draft = Translator.Caption?.DisplayOriginalCaption ?? string.Empty;
-                Dispatcher.BeginInvoke(new Action(() =>
+                if (draft == null)
                 {
-                    viewModel.SetDraft(draft);
-                    viewModel.SetDraftTranslation(string.Empty);
-                    if (!string.IsNullOrWhiteSpace(draft))
-                        viewModel.SessionStatus = "正在识别英文";
-                }));
-            }
-            else if (e.PropertyName == nameof(Caption.DisplayTranslatedCaption))
+                    viewModel.SetDraft((TranscriptSegment?)null);
+                    return;
+                }
+
+                viewModel.SetDraft(draft);
+                if (!string.IsNullOrWhiteSpace(draft.TranslatedText))
+                {
+                    viewModel.SetDraftTranslation(
+                        draft.Id,
+                        draft.Revision,
+                        draft.TranslatedText);
+                    viewModel.SessionStatus = "正在接收译文";
+                }
+                else if (!string.IsNullOrWhiteSpace(draft.SourceText))
+                {
+                    viewModel.SessionStatus = "正在识别英文";
+                }
+            }));
+        }
+
+        private void OnTranscriptSegmentChanged(TranscriptSegment segment)
+        {
+            if (viewModel.IsDemoRunning)
+                return;
+
+            Dispatcher.BeginInvoke(new Action(() =>
             {
-                string partialTranslation =
-                    Translator.Caption?.DisplayTranslatedCaption ?? string.Empty;
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    viewModel.SetDraftTranslation(partialTranslation);
-                    if (!string.IsNullOrWhiteSpace(partialTranslation) &&
-                        !TranslationTextPolicy.IsProviderNotice(partialTranslation))
-                    {
-                        viewModel.SessionStatus = "正在接收译文";
-                    }
-                }));
-            }
+                viewModel.ApplySegment(segment);
+                viewModel.ClearDraft(segment.Id, segment.Revision);
+                viewModel.SessionStatus = segment.State == SegmentState.TranslationFailed
+                    ? "部分句子翻译失败；原文已保留"
+                    : "正在实时翻译";
+            }));
         }
 
         private void OnTranslationEntryLogged(TranslationHistoryChange change)
         {
             if (viewModel.IsDemoRunning)
+                return;
+            if (change.SegmentId.HasValue && !change.IsFinal)
                 return;
 
             lock (historyProjectionLock)
@@ -320,7 +335,11 @@ namespace LiveCaptionsTranslator
             }
 
             Dispatcher.BeginInvoke(new Action(() => AddHistoryEntry(
-                change.Entry, change.ReplacedEntryId)));
+                change.Entry,
+                change.ReplacedEntryId,
+                change.SegmentId,
+                change.Sequence,
+                change.Revision)));
         }
 
         private async Task LoadRecentHistoryAsync(bool clearTimeline)
@@ -342,6 +361,7 @@ namespace LiveCaptionsTranslator
                 {
                     viewModel.ResetTimeline();
                     loadedEntryIds.Clear();
+                    loadedSegmentIds.Clear();
                     legacySequence = 0;
                 }
 
@@ -366,7 +386,12 @@ namespace LiveCaptionsTranslator
                     }
 
                     foreach (var change in pending)
-                        AddHistoryEntry(change.Entry, change.ReplacedEntryId);
+                        AddHistoryEntry(
+                            change.Entry,
+                            change.ReplacedEntryId,
+                            change.SegmentId,
+                            change.Sequence,
+                            change.Revision);
                 }
 
                 completed = true;
@@ -384,9 +409,14 @@ namespace LiveCaptionsTranslator
                 viewModel.SessionStatus = "已恢复最近字幕，等待新内容";
         }
 
-        private void AddHistoryEntry(TranslationHistoryEntry entry, long? replacedEntryId = null)
+        private void AddHistoryEntry(
+            TranslationHistoryEntry entry,
+            long? replacedEntryId = null,
+            Guid? stableSegmentId = null,
+            long? stableSequence = null,
+            int revision = 0)
         {
-            if (entry.Id > 0 && loadedEntryIds.Contains(entry.Id))
+            if (entry.Id > 0 && loadedEntryIds.Contains(entry.Id) && !stableSegmentId.HasValue)
                 return;
 
             DateTimeOffset capturedAt = DateTimeOffset.Now;
@@ -412,10 +442,11 @@ namespace LiveCaptionsTranslator
                 translatedText = entry.TranslatedText;
             }
 
+            Guid segmentId = stableSegmentId ?? ResolveHistorySegmentId(entry.Id);
             var segment = new TranscriptSegment(
-                Guid.NewGuid(),
-                entry.Id > 0 ? entry.Id : ++legacySequence,
-                0,
+                segmentId,
+                stableSequence ?? (entry.Id > 0 ? entry.Id : ++legacySequence),
+                revision,
                 entry.SourceText,
                 translatedText,
                 state,
@@ -429,13 +460,25 @@ namespace LiveCaptionsTranslator
             }
 
             if (entry.Id > 0)
+            {
                 loadedEntryIds.Add(entry.Id);
+                loadedSegmentIds[entry.Id] = segment.Id;
+            }
             if (!replaced)
                 viewModel.ApplySegment(segment);
-            viewModel.SetDraft(string.Empty);
+            if (stableSegmentId.HasValue)
+                viewModel.ClearDraft(stableSegmentId.Value, revision);
             viewModel.SessionStatus = state == SegmentState.TranslationFailed
                 ? "部分句子翻译失败；原文已保留"
                 : "正在实时翻译";
+        }
+
+        private Guid ResolveHistorySegmentId(long entryId)
+        {
+            if (entryId > 0 && loadedSegmentIds.TryGetValue(entryId, out Guid existing))
+                return existing;
+
+            return Guid.NewGuid();
         }
 
         private async void DemoTimeline_Click(object sender, RoutedEventArgs e)

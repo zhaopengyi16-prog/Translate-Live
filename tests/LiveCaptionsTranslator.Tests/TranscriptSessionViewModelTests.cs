@@ -33,6 +33,36 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
+        public void RevisionCannotMoveTheOriginalTimeOrSequence()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            Guid id = Guid.NewGuid();
+            DateTimeOffset firstCapture = new(
+                2026, 9, 11, 14, 13, 29, TimeSpan.Zero);
+            viewModel.ApplySegment(new TranscriptSegment(
+                id,
+                7,
+                0,
+                "Original.",
+                null,
+                SegmentState.Committed,
+                firstCapture));
+
+            viewModel.ApplySegment(new TranscriptSegment(
+                id,
+                99,
+                1,
+                "Corrected.",
+                "修订。",
+                SegmentState.Translated,
+                firstCapture.AddSeconds(30)));
+
+            Assert.AreEqual(7, viewModel.Segments[0].Sequence);
+            Assert.AreEqual(firstCapture, viewModel.Segments[0].CapturedAt);
+            Assert.AreEqual("Corrected.", viewModel.Segments[0].SourceText);
+        }
+
+        [TestMethod]
         public void ReplacedHistoryEntryUpdatesTheExistingCard()
         {
             var viewModel = new TranscriptSessionViewModel();
@@ -75,6 +105,19 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
+        public void BrowsingHistoryAlwaysOffersReturnToLive()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            viewModel.ApplySegment(Create(1));
+
+            viewModel.BeginBrowsingHistory();
+
+            Assert.IsTrue(viewModel.IsBrowsingHistory);
+            Assert.IsTrue(viewModel.IsReturnToLiveVisible);
+            Assert.AreEqual("回到实时", viewModel.ReturnToLiveText);
+        }
+
+        [TestMethod]
         public void StreamingDraftTranslationIsClearedWithTheDraft()
         {
             var viewModel = new TranscriptSessionViewModel();
@@ -87,6 +130,49 @@ namespace LiveCaptionsTranslator.Tests
             viewModel.SetDraft(string.Empty);
 
             Assert.IsFalse(viewModel.HasDraftTranslation);
+            Assert.AreEqual(string.Empty, viewModel.DraftTranslation);
+        }
+
+        [TestMethod]
+        public void CompletingAnOlderSegmentDoesNotClearTheNextDraft()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            Guid firstId = Guid.NewGuid();
+            Guid secondId = Guid.NewGuid();
+            viewModel.SetDraft(new TranscriptSegment(
+                secondId,
+                2,
+                1,
+                "Second sentence is already being recognized",
+                "第二句正在识别",
+                SegmentState.Draft,
+                DateTimeOffset.UtcNow));
+
+            bool cleared = viewModel.ClearDraft(firstId, finalRevision: 4);
+
+            Assert.IsFalse(cleared);
+            Assert.AreEqual(secondId, viewModel.DraftSegmentId);
+            Assert.AreEqual("Second sentence is already being recognized", viewModel.DraftText);
+            Assert.AreEqual("第二句正在识别", viewModel.DraftTranslation);
+        }
+
+        [TestMethod]
+        public void OlderDraftTranslationCannotOverwriteANewerRevision()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            Guid id = Guid.NewGuid();
+            viewModel.SetDraft(new TranscriptSegment(
+                id,
+                1,
+                2,
+                "Current revision",
+                null,
+                SegmentState.Draft,
+                DateTimeOffset.UtcNow));
+
+            bool applied = viewModel.SetDraftTranslation(id, 1, "过期译文");
+
+            Assert.IsFalse(applied);
             Assert.AreEqual(string.Empty, viewModel.DraftTranslation);
         }
 

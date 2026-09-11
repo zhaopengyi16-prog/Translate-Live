@@ -85,6 +85,50 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
+        public async Task ConcurrentIdenticalUtterancesAreNotSilentlyCollapsed()
+        {
+            var releaseFirst = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var persisted = new ConcurrentQueue<string>();
+            var queue = new TranslationTaskQueue((result, _) =>
+            {
+                persisted.Enqueue(result.OriginalText);
+                return Task.CompletedTask;
+            });
+
+            queue.Enqueue(
+                async (token, _) =>
+                {
+                    firstStarted.SetResult();
+                    await releaseFirst.Task.WaitAsync(token);
+                    return ("你好。", true);
+                },
+                "Hello.",
+                "Test",
+                1,
+                "zh-CN",
+                new TranslationTaskIdentity(
+                    Guid.NewGuid(), 1, 0, true, DateTimeOffset.UtcNow));
+            await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            queue.Enqueue(
+                (_, _) => Task.FromResult<(string, bool)>(("你好。", true)),
+                "Hello.",
+                "Test",
+                1,
+                "zh-CN",
+                new TranslationTaskIdentity(
+                    Guid.NewGuid(), 2, 0, true, DateTimeOffset.UtcNow));
+            releaseFirst.SetResult();
+
+            await queue.WaitForPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.Delay(100);
+            Assert.HasCount(2, persisted);
+        }
+
+        [TestMethod]
         public async Task QueueContinuesAfterActiveWorkerIsCanceled()
         {
             var queue = new TranslationTaskQueue();

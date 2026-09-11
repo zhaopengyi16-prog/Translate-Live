@@ -224,26 +224,36 @@ namespace LiveCaptionsTranslator.utils
             string targetLanguage,
             string apiUsed,
             long? sessionId = null,
+            CancellationToken token = default,
+            DateTimeOffset? capturedAt = null)
+        {
+            return await reviewRepository.CreateTranslationAsync(
+                sessionId,
+                sourceText,
+                translatedText,
+                targetLanguage,
+                apiUsed,
+                capturedAt,
+                token);
+        }
+
+        public static async Task<TranslationHistoryEntry?> UpdateLoggedTranslationAsync(
+            long entryId,
+            long? sessionId,
+            string sourceText,
+            string translatedText,
+            string targetLanguage,
+            string apiUsed,
             CancellationToken token = default)
         {
-            DateTimeOffset timestamp = DateTimeOffset.UtcNow;
-            await using var connection = OpenConnection();
-            await using var command = connection.CreateCommand();
-            command.CommandText = @"
-                INSERT INTO TranslationHistory
-                    (Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed, SessionId)
-                VALUES
-                    (@Timestamp, @SourceText, @TranslatedText, @TargetLanguage, @ApiUsed, @SessionId)
-                RETURNING Id;";
-            command.Parameters.AddWithValue("@Timestamp", timestamp.ToUnixTimeSeconds());
-            command.Parameters.AddWithValue("@SourceText", sourceText);
-            command.Parameters.AddWithValue("@TranslatedText", translatedText);
-            command.Parameters.AddWithValue("@TargetLanguage", targetLanguage);
-            command.Parameters.AddWithValue("@ApiUsed", apiUsed);
-            command.Parameters.AddWithValue("@SessionId", (object?)sessionId ?? DBNull.Value);
-            long id = Convert.ToInt64(await command.ExecuteScalarAsync(token));
-            return MapEntry(
-                id, sessionId, timestamp, sourceText, translatedText, targetLanguage, apiUsed, "");
+            return await reviewRepository.UpdateTranslationSnapshotAsync(
+                entryId,
+                sessionId,
+                sourceText,
+                translatedText,
+                targetLanguage,
+                apiUsed,
+                token);
         }
 
         public static async Task<List<LectureSessionEntry>> LoadSessionsAsync(

@@ -14,9 +14,24 @@ Verified local baseline:
 - .NET SDK 10.0.400;
 - locked dependency restoration;
 - Release build successful;
-- 105 unit tests passing;
+- 142 automated tests passing;
 - self-contained win-x64 publish successful;
 - Windows Live Captions system-audio and microphone smoke checks successful in an isolated data root.
+- real WPF timeline smoke checks successful for queued-scroll cancellation, reading-anchor preservation, return-to-live, long-draft height, font enlargement, and window resizing.
+
+Subtitle rollback regression evidence:
+
+- the pre-fix production-segmenter replay `A → B long → B short → old A → old B short` failed its identity assertion and produced five logical identities;
+- the repaired replay produces three valid revision events (`A`, `B`, and the shorter revision of `B`) across exactly two identities;
+- old `A` and old `B` frames produce no translation submission;
+- the isolated SQLite chain contains exactly two rows, and the `B` row is updated in place while retaining its first recognition timestamp.
+
+Growing-final regression evidence:
+
+- a five-frame workspace replay in which one sentence grows while commas and terminal punctuation change failed before the fix with three logical identities;
+- the repaired production segmenter emits revisions `0` through `4` under one `SegmentId`;
+- the production queue, workspace view model, and isolated SQLite repository finish with one visible row and one database row containing the latest revision and the original capture time;
+- a long sentence with a shared opening but different later words remains a distinct sentence.
 
 ## Supported release target
 
@@ -66,6 +81,16 @@ Compilation is not sufficient evidence for the capture path. Before a binary rel
 8. Confirm the production data directory was not modified.
 
 The smoke-test project reports only state, availability, and character counts; it must not print captured content.
+
+Targeted desktop commands after a Release build:
+
+~~~powershell
+$env:LECTURE_COPILOT_DATA_ROOT = Join-Path $env:TEMP ("TranslateLive-Smoke-" + [guid]::NewGuid().ToString("N"))
+tests/LiveCaptionsTranslator.SmokeTests/bin/Release/net10.0-windows/LiveCaptionsTranslator.SmokeTests.exe --system-audio
+tests/LiveCaptionsTranslator.SmokeTests/bin/Release/net10.0-windows/LiveCaptionsTranslator.SmokeTests.exe --timeline-ui
+~~~
+
+The timeline smoke uses the production `TranscriptTimeline` control and `TranscriptSessionViewModel`. It is not a substitute for a visible human usability review, but it verifies actual WPF layout and dispatcher behavior rather than only testing a scroll helper.
 
 ## Security and privacy gate
 

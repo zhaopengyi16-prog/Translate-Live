@@ -2,7 +2,7 @@
 
 面向 Windows 11 的实时双语字幕、课堂翻译、课程回顾与总结工具。
 
-[English](README.md) · [项目说明](docs/PROJECT.md) · [构建与发布](docs/RELEASE.md)
+[English](README.md) · [项目说明](docs/PROJECT.md) · [构建与发布](docs/RELEASE.md) · [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md)
 
 [![Windows CI](https://github.com/zhaopengyi16-prog/Translate-Live/actions/workflows/dotnet-build.yml/badge.svg)](https://github.com/zhaopengyi16-prog/Translate-Live/actions/workflows/dotnet-build.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -130,7 +130,7 @@ SQLite 课堂会话与回顾
 ## 路线图
 
 - 可重复的 GitHub Release、代码签名和安装程序；
-- 在干净 Windows Runner 上完成 CI 冷还原；
+- 可复现并签名的 Windows 发布产物；
 - 完善首次使用诊断和服务商健康状态；
 - 评估可插拔独立 ASR，并保留 Windows 实时字幕作为回退。
 
@@ -141,6 +141,8 @@ SQLite 课堂会话与回顾
 1. 删除密钥和个人课堂内容；
 2. 提供 Windows 版本、音源模式、服务商名称和可复现步骤；
 3. 修改代码后运行 `./scripts/build.ps1` 与 `./scripts/test.ps1`。
+
+完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## 上游来源与署名
 

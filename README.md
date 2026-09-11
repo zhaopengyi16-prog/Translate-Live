@@ -2,7 +2,7 @@
 
 Real-time bilingual captions, translation, lecture review, and summaries for Windows 11.
 
-[简体中文](README_zh-CN.md) · [Project notes](docs/PROJECT.md) · [Build and release](docs/RELEASE.md)
+[简体中文](README_zh-CN.md) · [Project notes](docs/PROJECT.md) · [Build and release](docs/RELEASE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 [![Windows CI](https://github.com/zhaopengyi16-prog/Translate-Live/actions/workflows/dotnet-build.yml/badge.svg)](https://github.com/zhaopengyi16-prog/Translate-Live/actions/workflows/dotnet-build.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -130,7 +130,7 @@ See [docs/PROJECT.md](docs/PROJECT.md) for component boundaries and storage rule
 ## Roadmap
 
 - signed installer and reproducible GitHub Release;
-- CI validation on a clean Windows runner;
+- signed, reproducible Windows release artifacts;
 - first-run diagnostics and clearer provider health reporting;
 - optional pluggable ASR source while retaining Windows Live Captions as a fallback.
 
@@ -141,6 +141,8 @@ Bug reports and focused pull requests are welcome. Before opening an issue:
 1. remove API keys and personal transcript content;
 2. include the Windows version, capture mode, provider name, and reproducible steps;
 3. run `./scripts/build.ps1` and `./scripts/test.ps1` when changing code.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow. Please report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## Upstream and attribution
 

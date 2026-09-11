@@ -1,0 +1,63 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<UseWPF>true</UseWPF>
+		<RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+		<PublishReadyToRun>false</PublishReadyToRun>
+		<PublishSingleFile>false</PublishSingleFile>
+		<SelfContained>false</SelfContained>
+		<IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+
+		<AssemblyName>LectureCopilot.Dev</AssemblyName>
+		<RootNamespace>LiveCaptionsTranslator</RootNamespace>
+		<Title>Translate Live</Title>
+		<Description>Translate Live real-time classroom captions and translation for Windows.</Description>
+		<Copyright>Copyright (c) 2024 SakiRinn and contributors; modifications (c) 2026 QuBe</Copyright>
+		<Authors>SakiRinn and contributors; QuBe</Authors>
+		<RepositoryUrl>https://github.com/zhaopengyi16-prog/Translate-Live</RepositoryUrl>
+		<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+		<Platforms>AnyCPU;ARM64</Platforms>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ApplicationDefinition Include="src\App.xaml">
+			<Generator>MSBuild:Compile</Generator>
+			<SubType>Designer</SubType>
+		</ApplicationDefinition>
+		<PackageReference Include="Interop.UIAutomationClient" Version="10.19041.0" />
+		
+		<PackageReference Include="CsvHelper" Version="33.0.1" />
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+		<PackageReference Include="WPF-UI" Version="4.0.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <None Update="Properties\AssemblyInfo.tt">
+	    <Generator>TextTemplatingFileGenerator</Generator>
+	    <LastGenOutput>AssemblyInfo.cs</LastGenOutput>
+	  </None>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Service Include="{508349b6-6b84-4df5-91f0-309beebad82d}" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Compile Update="Properties\AssemblyInfo.cs">
+	    <DesignTime>True</DesignTime>
+	    <AutoGen>True</AutoGen>
+	    <DependentUpon>AssemblyInfo.tt</DependentUpon>
+	  </Compile>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Compile Remove="tests\**\*.cs" />
+	</ItemGroup>
+
+</Project>

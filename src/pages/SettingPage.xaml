@@ -1,0 +1,273 @@
+<Page
+    x:Class="LiveCaptionsTranslator.SettingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    Title="设置"
+    Background="{DynamicResource LectureWindowBrush}"
+    FontFamily="{DynamicResource LectureUiFontFamily}"
+    Foreground="{DynamicResource LectureTextPrimaryBrush}"
+    JournalEntry.KeepAlive="False"
+    mc:Ignorable="d">
+
+    <Page.Resources>
+        <Style x:Key="SettingGroupStyle" TargetType="Border">
+            <Setter Property="Padding" Value="22" />
+            <Setter Property="Background" Value="{DynamicResource LectureSurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource LectureDividerBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+        </Style>
+        <Style x:Key="InfoButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="24" />
+            <Setter Property="Height" Value="24" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource LectureTextTertiaryBrush}" />
+        </Style>
+    </Page.Resources>
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="34,28,34,40" MaxWidth="1040" HorizontalAlignment="Left">
+            <TextBlock Style="{StaticResource LecturePageTitleStyle}" Text="设置" />
+            <TextBlock
+                Margin="0,7,0,24"
+                Style="{StaticResource LectureMutedTextStyle}"
+                Text="连接 Windows 实时字幕、选择翻译引擎，并调整实时显示行为。" />
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="16" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource SettingGroupStyle}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="Windows 实时字幕" />
+                            <Button
+                                x:Name="LiveCaptionsInfo"
+                                Margin="6,-2,0,0"
+                                MouseEnter="LiveCaptionsInfo_MouseEnter"
+                                MouseLeave="LiveCaptionsInfo_MouseLeave"
+                                Style="{StaticResource InfoButtonStyle}">
+                                <ui:SymbolIcon Symbol="Info16" />
+                            </Button>
+                            <ui:Flyout x:Name="LiveCaptionsInfoFlyout">
+                                <TextBlock Width="310" Text="Windows 11 24H2 之后，源语言需要在系统实时字幕中修改。请使用此处的显示/隐藏，不要直接结束系统字幕。" TextWrapping="Wrap" />
+                            </ui:Flyout>
+                        </StackPanel>
+                        <TextBlock
+                            Margin="0,8,0,18"
+                            Style="{StaticResource LectureMutedTextStyle}"
+                            Text="需要调整系统字幕的源语言或检查连接时，可暂时显示原窗口。"
+                            TextWrapping="Wrap" />
+                        <Button
+                            x:Name="LiveCaptionsButton"
+                            Width="138"
+                            HorizontalAlignment="Left"
+                            Click="LiveCaptionsButton_click"
+                            Style="{StaticResource LectureButtonStyle}">
+                            <TextBlock x:Name="ButtonText" Text="显示系统字幕" />
+                        </Button>
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="2" Style="{StaticResource SettingGroupStyle}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="翻译引擎" />
+                            <Button
+                                x:Name="TranslateAPIInfo"
+                                Margin="6,-2,0,0"
+                                MouseEnter="TranslateAPIInfo_MouseEnter"
+                                MouseLeave="TranslateAPIInfo_MouseLeave"
+                                Style="{StaticResource InfoButtonStyle}">
+                                <ui:SymbolIcon Symbol="Info16" />
+                            </Button>
+                            <ui:Flyout x:Name="TranslateAPIInfoFlyout">
+                                <TextBlock Width="310" Text="Google 可直接使用；其他在线或本地引擎需要在详细设置中配置。课堂总结模型与这里独立。" TextWrapping="Wrap" />
+                            </ui:Flyout>
+                        </StackPanel>
+
+                        <Grid Margin="0,15,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="14" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,6" Style="{StaticResource LectureMutedTextStyle}" Text="服务" />
+                                <ComboBox
+                                    x:Name="TranslateAPIBox"
+                                    Height="36"
+                                    Padding="8,4"
+                                    SelectedItem="{Binding ApiName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                    SelectionChanged="TranslateAPIBox_SelectionChanged" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Margin="0,0,0,6" Style="{StaticResource LectureMutedTextStyle}" Text="目标语言" />
+                                    <Button
+                                        x:Name="TargetLangInfo"
+                                        Margin="5,-4,0,0"
+                                        MouseEnter="TargetLangInfo_MouseEnter"
+                                        MouseLeave="TargetLangInfo_MouseLeave"
+                                        Style="{StaticResource InfoButtonStyle}">
+                                        <ui:SymbolIcon Symbol="Info16" />
+                                    </Button>
+                                    <ui:Flyout x:Name="TargetLangInfoFlyout">
+                                        <TextBlock Width="330" Text="可直接输入 BCP 47 语言标签。部分服务对自定义语言代码有独立要求，请参考相应服务文档。" TextWrapping="Wrap" />
+                                    </ui:Flyout>
+                                </StackPanel>
+                                <ComboBox
+                                    x:Name="TargetLangBox"
+                                    Height="36"
+                                    Padding="8,4"
+                                    IsEditable="True"
+                                    LostFocus="TargetLangBox_LostFocus"
+                                    SelectionChanged="TargetLangBox_SelectionChanged" />
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border Margin="0,16,0,0" Style="{StaticResource SettingGroupStyle}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="实时翻译行为" />
+                    <TextBlock
+                        Margin="0,7,0,20"
+                        Style="{StaticResource LectureMutedTextStyle}"
+                        Text="调整频率、上下文和悬浮字幕显示量。更频繁的调用会增加服务请求。" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1.35*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0" Margin="0,0,28,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Style="{StaticResource LectureMutedTextStyle}" Text="API 调用间隔" />
+                                <Button
+                                    x:Name="FrequencyInfo"
+                                    Margin="5,-4,0,0"
+                                    MouseEnter="FrequencyInfo_MouseEnter"
+                                    MouseLeave="FrequencyInfo_MouseLeave"
+                                    Style="{StaticResource InfoButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Info16" />
+                                </Button>
+                                <ui:Flyout x:Name="FrequencyInfoFlyout">
+                                    <TextBlock Width="300" Text="值越小，字幕变化后越早发起翻译请求。" TextWrapping="Wrap" />
+                                </ui:Flyout>
+                            </StackPanel>
+                            <Slider
+                                Margin="0,12,0,0"
+                                AutoToolTipPlacement="TopLeft"
+                                AutoToolTipPrecision="0"
+                                Maximum="10"
+                                Value="{Binding MaxSyncInterval, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Margin="0,0,24,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Style="{StaticResource LectureMutedTextStyle}" Text="上下文句数" />
+                                <Button
+                                    x:Name="CaptionLogMaxInfo"
+                                    Margin="5,-4,0,0"
+                                    MouseEnter="CaptionLogMaxInfo_MouseEnter"
+                                    MouseLeave="CaptionLogMaxInfo_MouseLeave"
+                                    Style="{StaticResource InfoButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Info16" />
+                                </Button>
+                                <ui:Flyout x:Name="CaptionLogMaxInfoFlyout">
+                                    <TextBlock Width="330" Text="上下文句数用于上下文翻译；显示句数用于悬浮字幕。上下文不得小于显示句数。" TextWrapping="Wrap" />
+                                </ui:Flyout>
+                            </StackPanel>
+                            <ui:NumberBox
+                                Margin="0,8,0,0"
+                                Height="36"
+                                AcceptsExpression="False"
+                                ClearButtonEnabled="False"
+                                LargeChange="1"
+                                Maximum="10"
+                                Minimum="1"
+                                SmallChange="1"
+                                SpinButtonPlacementMode="Inline"
+                                Value="{Binding NumContexts, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                ValueChanged="Contexts_ValueChanged" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2" Margin="0,0,24,0">
+                            <TextBlock Style="{StaticResource LectureMutedTextStyle}" Text="悬浮字幕句数" />
+                            <ui:NumberBox
+                                Margin="0,8,0,0"
+                                Height="36"
+                                AcceptsExpression="False"
+                                ClearButtonEnabled="False"
+                                LargeChange="1"
+                                Maximum="6"
+                                Minimum="0"
+                                SmallChange="1"
+                                SpinButtonPlacementMode="Inline"
+                                Value="{Binding DisplaySentences, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                ValueChanged="DisplaySentences_ValueChanged" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="3">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Style="{StaticResource LectureMutedTextStyle}" Text="上下文感知" />
+                                <Button
+                                    x:Name="ContextAwareInfo"
+                                    Margin="5,-4,0,0"
+                                    MouseEnter="ContextAwareInfo_MouseEnter"
+                                    MouseLeave="ContextAwareInfo_MouseLeave"
+                                    Style="{StaticResource InfoButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Info16" />
+                                </Button>
+                                <ui:Flyout x:Name="ContextAwareInfoFlyout">
+                                    <TextBlock Width="300" Text="提供相邻句子可改善上下文翻译，但会消耗更多令牌。" TextWrapping="Wrap" />
+                                </ui:Flyout>
+                            </StackPanel>
+                            <ui:ToggleSwitch
+                                Margin="0,8,0,0"
+                                IsChecked="{Binding ContextAware, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                OffContent="关闭"
+                                OnContent="开启" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Separator Margin="0,22,0,18" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock VerticalAlignment="Center" Style="{StaticResource LectureMutedTextStyle}" Text="显示翻译延迟" />
+                            <ui:ToggleSwitch
+                                Margin="12,0,0,0"
+                                IsChecked="{Binding MainWindow.LatencyShow, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                OffContent="关闭"
+                                OnContent="开启" />
+                        </StackPanel>
+                        <Button
+                            x:Name="APISettingButton"
+                            Grid.Column="1"
+                            AutomationProperties.AutomationId="OpenDetailedSettingsButton"
+                            Click="APISettingButton_click"
+                            Content="外观、模型与凭据…"
+                            Style="{StaticResource LecturePrimaryButtonStyle}" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

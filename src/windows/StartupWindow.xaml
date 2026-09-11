@@ -1,0 +1,238 @@
+<Window
+    x:Class="LiveCaptionsTranslator.StartupWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Translate Live"
+    AllowsTransparency="True"
+    Background="Transparent"
+    ResizeMode="NoResize"
+    ShowActivated="False"
+    ShowInTaskbar="False"
+    Topmost="True"
+    UseLayoutRounding="True"
+    WindowStartupLocation="Manual"
+    WindowStyle="None">
+
+    <Window.Resources>
+        <Storyboard x:Key="StartupRevealStoryboard">
+            <DoubleAnimation
+                Storyboard.TargetName="StartupRoot"
+                Storyboard.TargetProperty="Opacity"
+                From="0"
+                To="1"
+                Duration="0:0:0.16" />
+
+            <DoubleAnimation
+                Storyboard.TargetName="IconScale"
+                Storyboard.TargetProperty="ScaleX"
+                From="0.76"
+                To="1"
+                Duration="0:0:0.38">
+                <DoubleAnimation.EasingFunction>
+                    <BackEase Amplitude="0.18" EasingMode="EaseOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation
+                Storyboard.TargetName="IconScale"
+                Storyboard.TargetProperty="ScaleY"
+                From="0.76"
+                To="1"
+                Duration="0:0:0.38">
+                <DoubleAnimation.EasingFunction>
+                    <BackEase Amplitude="0.18" EasingMode="EaseOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation
+                Storyboard.TargetName="IconCard"
+                Storyboard.TargetProperty="Opacity"
+                From="0"
+                To="1"
+                Duration="0:0:0.24" />
+
+            <DoubleAnimation
+                Storyboard.TargetName="DropScale"
+                Storyboard.TargetProperty="ScaleX"
+                BeginTime="0:0:0.22"
+                From="0.028"
+                To="1.04"
+                Duration="0:0:1.08">
+                <DoubleAnimation.EasingFunction>
+                    <CubicEase EasingMode="EaseInOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation
+                Storyboard.TargetName="DropScale"
+                Storyboard.TargetProperty="ScaleY"
+                BeginTime="0:0:0.22"
+                From="0.020"
+                To="1.04"
+                Duration="0:0:1.08">
+                <DoubleAnimation.EasingFunction>
+                    <CubicEase EasingMode="EaseInOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation
+                Storyboard.TargetName="DropRotate"
+                Storyboard.TargetProperty="Angle"
+                BeginTime="0:0:0.22"
+                From="-7"
+                To="0"
+                Duration="0:0:1.08">
+                <DoubleAnimation.EasingFunction>
+                    <SineEase EasingMode="EaseOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+
+            <DoubleAnimation
+                Storyboard.TargetName="RippleScale"
+                Storyboard.TargetProperty="ScaleX"
+                BeginTime="0:0:0.20"
+                From="0.030"
+                To="0.19"
+                Duration="0:0:0.58">
+                <DoubleAnimation.EasingFunction>
+                    <QuadraticEase EasingMode="EaseOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation
+                Storyboard.TargetName="RippleScale"
+                Storyboard.TargetProperty="ScaleY"
+                BeginTime="0:0:0.20"
+                From="0.030"
+                To="0.19"
+                Duration="0:0:0.58">
+                <DoubleAnimation.EasingFunction>
+                    <QuadraticEase EasingMode="EaseOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation
+                Storyboard.TargetName="LiquidRipple"
+                Storyboard.TargetProperty="Opacity"
+                BeginTime="0:0:0.20"
+                From="0.72"
+                To="0"
+                Duration="0:0:0.58" />
+
+            <DoubleAnimation
+                Storyboard.TargetName="BrandText"
+                Storyboard.TargetProperty="Opacity"
+                BeginTime="0:0:0.32"
+                From="0"
+                To="1"
+                Duration="0:0:0.30" />
+            <DoubleAnimation
+                Storyboard.TargetName="BrandTranslate"
+                Storyboard.TargetProperty="Y"
+                BeginTime="0:0:0.32"
+                From="8"
+                To="0"
+                Duration="0:0:0.30">
+                <DoubleAnimation.EasingFunction>
+                    <QuadraticEase EasingMode="EaseOut" />
+                </DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+
+            <DoubleAnimation
+                Storyboard.TargetName="IconCard"
+                Storyboard.TargetProperty="Opacity"
+                BeginTime="0:0:1.02"
+                From="1"
+                To="0"
+                Duration="0:0:0.24" />
+            <DoubleAnimation
+                Storyboard.TargetName="BrandText"
+                Storyboard.TargetProperty="Opacity"
+                BeginTime="0:0:1.02"
+                From="1"
+                To="0"
+                Duration="0:0:0.24" />
+        </Storyboard>
+    </Window.Resources>
+
+    <Grid x:Name="StartupRoot" Background="Transparent" ClipToBounds="True" Opacity="0">
+        <Ellipse
+            x:Name="LiquidDrop"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            RenderTransformOrigin="0.5,0.5">
+            <Ellipse.Fill>
+                <RadialGradientBrush Center="0.42,0.38" GradientOrigin="0.34,0.28" RadiusX="0.72" RadiusY="0.72">
+                    <GradientStop Offset="0" Color="#FFF9FBF8" />
+                    <GradientStop Offset="0.38" Color="#FFF4EEF2" />
+                    <GradientStop Offset="0.70" Color="#FFE7EDEF" />
+                    <GradientStop Offset="1" Color="#FFDDE6E3" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+            <Ellipse.RenderTransform>
+                <TransformGroup>
+                    <ScaleTransform x:Name="DropScale" ScaleX="0.028" ScaleY="0.020" />
+                    <RotateTransform x:Name="DropRotate" Angle="-7" />
+                </TransformGroup>
+            </Ellipse.RenderTransform>
+        </Ellipse>
+
+        <Ellipse
+            x:Name="LiquidRipple"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Stroke="#92FFFFFF"
+            StrokeThickness="6"
+            RenderTransformOrigin="0.5,0.5">
+            <Ellipse.RenderTransform>
+                <ScaleTransform x:Name="RippleScale" ScaleX="0.03" ScaleY="0.03" />
+            </Ellipse.RenderTransform>
+        </Ellipse>
+
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Border
+                x:Name="IconCard"
+                Width="116"
+                Height="116"
+                Background="#D9FFFFFF"
+                BorderBrush="#BFFFFFFF"
+                BorderThickness="1"
+                CornerRadius="29"
+                Opacity="0"
+                RenderTransformOrigin="0.5,0.5">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="30" Opacity="0.28" ShadowDepth="8" Color="#5B4752" />
+                </Border.Effect>
+                <Border.RenderTransform>
+                    <ScaleTransform x:Name="IconScale" ScaleX="0.76" ScaleY="0.76" />
+                </Border.RenderTransform>
+                <Grid Margin="7">
+                    <Border Background="#FF2D2D2F" CornerRadius="22" />
+                    <Ellipse
+                        Width="28"
+                        Height="28"
+                        Margin="0,0,17,17"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Bottom"
+                        Fill="#FFDCE9E4" />
+                    <TextBlock
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        FontFamily="Segoe UI Variable Display, Segoe UI"
+                        FontSize="34"
+                        FontWeight="SemiBold"
+                        Foreground="White"
+                        Text="TL" />
+                </Grid>
+            </Border>
+            <TextBlock
+                x:Name="BrandText"
+                Margin="0,18,0,0"
+                HorizontalAlignment="Center"
+                FontFamily="Segoe UI Variable Display, Segoe UI, Microsoft YaHei UI"
+                FontSize="28"
+                FontWeight="SemiBold"
+                Foreground="#FF28272A"
+                Opacity="0"
+                Text="Translate Live">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform x:Name="BrandTranslate" Y="8" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+        </StackPanel>
+    </Grid>
+</Window>

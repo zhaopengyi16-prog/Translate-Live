@@ -1,0 +1,29 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore Dependencies
+        run: dotnet restore LiveCaptionsTranslator.sln --locked-mode
+
+      - name: Build
+        run: dotnet build LiveCaptionsTranslator.sln -c Release --no-restore -m:1 -nodeReuse:false
+
+      - name: Run Tests
+        run: dotnet test LiveCaptionsTranslator.sln -c Release --no-build --no-restore -m:1 -nodeReuse:false

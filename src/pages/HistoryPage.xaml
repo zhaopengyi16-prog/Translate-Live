@@ -1,0 +1,263 @@
+<Page
+    x:Class="LiveCaptionsTranslator.HistoryPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    Title="课堂回顾"
+    Background="{DynamicResource LectureWindowBrush}"
+    FontFamily="{DynamicResource LectureUiFontFamily}"
+    Foreground="{DynamicResource LectureTextPrimaryBrush}"
+    JournalEntry.KeepAlive="False"
+    mc:Ignorable="d">
+
+    <Page.Resources>
+        <Style x:Key="ToolbarButtonStyle" TargetType="Button" BasedOn="{StaticResource LectureButtonStyle}">
+            <Setter Property="Height" Value="34" />
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="Padding" Value="12,5" />
+        </Style>
+        <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource ToolbarButtonStyle}">
+            <Setter Property="Foreground" Value="{DynamicResource LectureErrorBrush}" />
+        </Style>
+        <Style x:Key="SessionItemStyle" TargetType="ListBoxItem">
+            <Setter Property="MinHeight" Value="72" />
+            <Setter Property="Margin" Value="0,0,0,3" />
+            <Setter Property="Padding" Value="14,10" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border
+                            x:Name="ItemChrome"
+                            Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ItemChrome" Property="Background" Value="{DynamicResource LectureHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ItemChrome" Property="Background" Value="{DynamicResource LectureSelectedBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ItemChrome" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="HistoryRowStyle" TargetType="DataGridRow">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource LectureTextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource LectureDividerBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource LectureHoverBrush}" />
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource LectureSelectedBrush}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="HistoryCellTextStyle" TargetType="TextBlock">
+            <Setter Property="Padding" Value="7,9" />
+            <Setter Property="FontFamily" Value="{DynamicResource LectureUiFontFamily}" />
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="Foreground" Value="{DynamicResource LectureTextPrimaryBrush}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </Page.Resources>
+
+    <Grid Margin="32,26,30,28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Style="{StaticResource LecturePageTitleStyle}" Text="课堂回顾" />
+                <TextBlock
+                    Margin="0,6,0,0"
+                    Style="{StaticResource LectureMutedTextStyle}"
+                    Text="每次开始到结束保存为一节课堂；课程和逐句记录均可单独整理。" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Orientation="Horizontal">
+                <ui:AutoSuggestBox
+                    x:Name="HistorySearchBox"
+                    Width="250"
+                    Height="34"
+                    PlaceholderText="搜索课程、原文或译文"
+                    QuerySubmitted="HistorySearchBox_QuerySubmitted"
+                    TextChanged="HistorySearchBox_TextChanged" />
+                <Button Click="ExportAll_click" Content="导出全部 CSV" Style="{StaticResource ToolbarButtonStyle}" />
+                <Button Click="Refresh_click" Content="刷新" Style="{StaticResource ToolbarButtonStyle}" />
+            </StackPanel>
+        </Grid>
+
+        <Border
+            Grid.Row="1"
+            Margin="0,22,0,0"
+            Background="{DynamicResource LectureSurfaceBrush}"
+            BorderBrush="{DynamicResource LectureDividerBrush}"
+            BorderThickness="1"
+            CornerRadius="8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="300" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Grid
+                    Grid.Column="0"
+                    Background="{DynamicResource LectureSidebarBrush}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Margin="18,18,18,10" Style="{StaticResource LectureSectionTitleStyle}" Text="课程列表" />
+                    <WrapPanel Grid.Row="1" Margin="12,0,12,10">
+                        <Button Click="CreateSession_click" Content="新建" Style="{StaticResource ToolbarButtonStyle}" />
+                        <Button x:Name="EditSessionButton" Click="EditSession_click" Content="编辑" IsEnabled="False" Style="{StaticResource ToolbarButtonStyle}" />
+                        <Button x:Name="DeleteSessionButton" Click="DeleteSession_click" Content="删除" IsEnabled="False" Style="{StaticResource DangerButtonStyle}" />
+                    </WrapPanel>
+                    <ListBox
+                        x:Name="SessionList"
+                        Grid.Row="2"
+                        Margin="10,0,10,10"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ItemContainerStyle="{StaticResource SessionItemStyle}"
+                        MouseDoubleClick="EditSession_click"
+                        SelectionChanged="SessionList_SelectionChanged"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel>
+                                    <TextBlock
+                                        FontFamily="{DynamicResource LectureUiFontFamily}"
+                                        FontSize="13"
+                                        FontWeight="SemiBold"
+                                        Foreground="{DynamicResource LectureTextPrimaryBrush}"
+                                        Text="{Binding Title}"
+                                        TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        Margin="0,5,0,0"
+                                        FontSize="10.5"
+                                        Foreground="{DynamicResource LectureTextTertiaryBrush}"
+                                        Text="{Binding Detail}"
+                                        TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        Margin="0,2,0,0"
+                                        FontSize="10.5"
+                                        Foreground="{DynamicResource LectureTextSecondaryBrush}"
+                                        Text="{Binding Duration}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+
+                <Grid Grid.Column="1" Margin="22,18,18,16">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel>
+                        <TextBlock
+                            x:Name="SelectedSessionTitle"
+                            Style="{StaticResource LectureSectionTitleStyle}"
+                            Text="请选择一节课堂"
+                            TextTrimming="CharacterEllipsis" />
+                        <TextBlock
+                            x:Name="SelectedSessionMeta"
+                            Margin="0,4,0,0"
+                            Style="{StaticResource LectureMutedTextStyle}"
+                            TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <WrapPanel Grid.Row="1" Margin="-6,14,0,12">
+                        <Button x:Name="CreateEntryButton" Click="CreateEntry_click" Content="新增条目" IsEnabled="False" Style="{StaticResource ToolbarButtonStyle}" />
+                        <Button x:Name="EditEntryButton" Click="EditEntry_click" Content="编辑条目" IsEnabled="False" Style="{StaticResource ToolbarButtonStyle}" />
+                        <Button x:Name="DeleteEntryButton" Click="DeleteEntry_click" Content="删除条目" IsEnabled="False" Style="{StaticResource DangerButtonStyle}" />
+                        <Button x:Name="ExportSessionButton" Click="ExportSession_click" Content="导出本课" IsEnabled="False" Style="{StaticResource ToolbarButtonStyle}" />
+                    </WrapPanel>
+
+                    <DataGrid
+                        x:Name="HistoryDataGrid"
+                        Grid.Row="2"
+                        AutoGenerateColumns="False"
+                        Background="Transparent"
+                        BorderBrush="{DynamicResource LectureDividerBrush}"
+                        BorderThickness="0,1,0,0"
+                        CanUserAddRows="False"
+                        CanUserDeleteRows="False"
+                        EnableRowVirtualization="True"
+                        GridLinesVisibility="None"
+                        HeadersVisibility="Column"
+                        IsReadOnly="True"
+                        MouseDoubleClick="EditEntry_click"
+                        RowHeaderWidth="0"
+                        RowStyle="{StaticResource HistoryRowStyle}"
+                        SelectionChanged="HistoryDataGrid_SelectionChanged"
+                        SelectionMode="Single"
+                        SelectionUnit="FullRow"
+                        VirtualizingPanel.IsVirtualizing="True"
+                        VirtualizingPanel.VirtualizationMode="Recycling">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Width="92" Binding="{Binding Timestamp}" Header="时间" />
+                            <DataGridTemplateColumn Width="*" Header="原文">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate><TextBlock Style="{StaticResource HistoryCellTextStyle}" Text="{Binding SourceText}" /></DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTemplateColumn Width="*" Header="译文">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate><TextBlock FontWeight="SemiBold" Style="{StaticResource HistoryCellTextStyle}" Text="{Binding TranslatedText}" /></DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Width="100" Binding="{Binding ApiUsed}" Header="引擎" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <Border
+                        Grid.Row="3"
+                        Margin="0,14,0,0"
+                        Padding="0,14,0,0"
+                        BorderBrush="{DynamicResource LectureDividerBrush}"
+                        BorderThickness="0,1,0,0">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource LectureMutedTextStyle}" Text="课堂总结" />
+                            <TextBlock
+                                x:Name="SessionSummaryText"
+                                Margin="0,6,0,0"
+                                MaxHeight="100"
+                                Foreground="{DynamicResource LectureTextPrimaryBrush}"
+                                Text="本次课堂尚未保存总结。"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+                <Border Grid.Column="1" Width="1" HorizontalAlignment="Left" Background="{DynamicResource LectureDividerBrush}" />
+            </Grid>
+        </Border>
+    </Grid>
+</Page>

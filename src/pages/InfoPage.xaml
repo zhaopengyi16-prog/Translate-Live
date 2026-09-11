@@ -1,0 +1,98 @@
+<Page
+    x:Class="LiveCaptionsTranslator.InfoPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="关于"
+    Background="{DynamicResource LectureWindowBrush}"
+    FontFamily="{DynamicResource LectureUiFontFamily}"
+    Foreground="{DynamicResource LectureTextPrimaryBrush}"
+    JournalEntry.KeepAlive="False"
+    mc:Ignorable="d">
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="36,30,36,44" MaxWidth="820" HorizontalAlignment="Left">
+            <TextBlock Style="{StaticResource LecturePageTitleStyle}" Text="关于 Translate Live" />
+            <TextBlock
+                Margin="0,10,0,28"
+                FontSize="14"
+                Foreground="{DynamicResource LectureTextSecondaryBrush}"
+                Text="基于 Windows 实时字幕的课堂实时翻译、回顾与总结工具。"
+                TextWrapping="Wrap" />
+
+            <Border
+                Padding="22"
+                Background="{DynamicResource LectureSurfaceBrush}"
+                BorderBrush="{DynamicResource LectureDividerBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="项目维护" />
+                    <TextBlock
+                        Margin="0,12,0,0"
+                        FontSize="14"
+                        FontWeight="SemiBold"
+                        Text="Translate Live · 二次开发与维护：QuBe" />
+                    <TextBlock
+                        Margin="0,8,0,0"
+                        Foreground="{DynamicResource LectureTextSecondaryBrush}"
+                        Text="上游作者：SakiRinn and other contributors"
+                        TextWrapping="Wrap" />
+                    <TextBlock Margin="0,5,0,0" Foreground="{DynamicResource LectureTextSecondaryBrush}" TextWrapping="Wrap">
+                        <Run Text="既有维护者：" />
+                        <Hyperlink NavigateUri="https://github.com/SakiRinn" RequestNavigate="Hyperlink_RequestNavigate">@SakiRinn</Hyperlink>
+                        <Run Text="（Author）、" />
+                        <Hyperlink NavigateUri="https://github.com/A-nony-mous" RequestNavigate="Hyperlink_RequestNavigate">@A-nony-mous</Hyperlink>
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <Border
+                Margin="0,14,0,0"
+                Padding="22"
+                Background="{DynamicResource LectureSurfaceBrush}"
+                BorderBrush="{DynamicResource LectureDividerBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="上游与许可证" />
+                    <TextBlock Margin="0,12,0,0" Foreground="{DynamicResource LectureTextSecondaryBrush}" TextWrapping="Wrap">
+                        <Run Text="上游仓库：" />
+                        <Hyperlink NavigateUri="https://github.com/SakiRinn/LiveCaptions-Translator" RequestNavigate="Hyperlink_RequestNavigate">SakiRinn/LiveCaptions-Translator</Hyperlink>
+                    </TextBlock>
+                    <TextBlock Margin="0,7,0,0" Foreground="{DynamicResource LectureTextSecondaryBrush}" Text="许可证：Apache License 2.0（根目录 LICENSE 原样保留）" />
+                    <TextBlock Margin="0,7,0,0" Foreground="{DynamicResource LectureTextSecondaryBrush}" TextWrapping="Wrap">
+                        <Run Text="上游 Wiki：" />
+                        <Hyperlink NavigateUri="https://github.com/SakiRinn/LiveCaptions-Translator/wiki" RequestNavigate="Hyperlink_RequestNavigate">
+                            <Run x:Name="Wiki" Text="使用文档" />
+                        </Hyperlink>
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <Border
+                Margin="0,14,0,0"
+                Padding="22"
+                Background="{DynamicResource LectureSurfaceBrush}"
+                BorderBrush="{DynamicResource LectureDividerBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="版本与贡献" />
+                    <TextBlock Margin="0,12,0,0" Foreground="{DynamicResource LectureTextSecondaryBrush}">
+                        <Run Text="当前程序集版本：" />
+                        <Hyperlink NavigateUri="https://github.com/zhaopengyi16-prog/Translate-Live/releases" RequestNavigate="Hyperlink_RequestNavigate">
+                            <Run x:Name="Version" Text="1.1.1.1" />
+                        </Hyperlink>
+                    </TextBlock>
+                    <TextBlock
+                        Margin="0,8,0,0"
+                        Foreground="{DynamicResource LectureTextSecondaryBrush}"
+                        Text="欢迎通过 Translate Live 的 Issues 和 Pull Requests 提交建议与贡献。"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -442,7 +442,13 @@ namespace LiveCaptionsTranslator
                 translatedText = entry.TranslatedText;
             }
 
-            Guid segmentId = stableSegmentId ?? ResolveHistorySegmentId(entry.Id);
+            Guid? projectedSegmentId = entry.Id > 0 &&
+                loadedSegmentIds.TryGetValue(entry.Id, out Guid projected)
+                ? projected
+                : null;
+            Guid segmentId = stableSegmentId ??
+                projectedSegmentId ??
+                ResolveHistorySegmentId(entry.Id);
             var segment = new TranscriptSegment(
                 segmentId,
                 stableSequence ?? (entry.Id > 0 ? entry.Id : ++legacySequence),
@@ -459,12 +465,23 @@ namespace LiveCaptionsTranslator
                 replaced = viewModel.ReplaceSegmentBySequence(replacedEntryId.Value, segment);
             }
 
+            bool rebound = false;
+            if (!replaced &&
+                projectedSegmentId.HasValue &&
+                stableSegmentId.HasValue &&
+                projectedSegmentId.Value != stableSegmentId.Value)
+            {
+                rebound = viewModel.RebindSegmentIdentity(
+                    projectedSegmentId.Value,
+                    segment);
+            }
+
             if (entry.Id > 0)
             {
                 loadedEntryIds.Add(entry.Id);
                 loadedSegmentIds[entry.Id] = segment.Id;
             }
-            if (!replaced)
+            if (!replaced && !rebound)
                 viewModel.ApplySegment(segment);
             if (stableSegmentId.HasValue)
                 viewModel.ClearDraft(stableSegmentId.Value, revision);

@@ -12,6 +12,13 @@ namespace LiveCaptionsTranslator.services
         bool IsFinal,
         DateTimeOffset CapturedAt);
 
+    internal sealed record PendingCaptionCandidate(
+        Guid CandidateId,
+        Guid HistoricalSegmentId,
+        string Text,
+        DateTimeOffset FirstObservedAt,
+        DateTimeOffset LastObservedAt);
+
     internal sealed record LiveCaptionUpdate(
         string NormalizedText,
         IReadOnlyList<LiveCaptionSegment> FinalizedSegments,
@@ -19,7 +26,9 @@ namespace LiveCaptionsTranslator.services
         LiveCaptionSegment? CurrentSegment,
         string CurrentText,
         bool DraftIsEligible,
-        TimeSpan DraftStableFor)
+        TimeSpan DraftStableFor,
+        IReadOnlyList<PendingCaptionCandidate> PendingCandidates,
+        IReadOnlyList<Guid> WindowSegmentIds)
     {
         public IReadOnlyList<string> FinalizedSentences =>
             FinalizedSegments.Select(segment => segment.Text).ToArray();
@@ -43,10 +52,12 @@ namespace LiveCaptionsTranslator.services
         // The recognizer exposes a rolling text window without sentence IDs.
         // Keep only a small recent identity ledger; time removes evidence but is
         // never itself evidence that an identical snapshot is a new utterance.
-        public const int RecentLedgerCapacity = 24;
-        public const int RevisionTextCapacity = 4;
+        public const int RecentLedgerCapacity = 64;
+        public const int RevisionTextCapacity = 8;
         public static readonly TimeSpan RecentLedgerRetention =
             TimeSpan.FromMinutes(2);
+        public const int RecentSnapshotCapacity = 16;
+        public const int PendingCandidateCapacity = 8;
 
         // Live Captions can temporarily punctuate a short phrase and then
         // continue or shorten it. Position, lexical boundaries, and this small
@@ -57,12 +68,6 @@ namespace LiveCaptionsTranslator.services
         public const int ShortTailMinimumCjkCharacters = 4;
         public const double ShortTailRollbackMinimumLengthRatio = 0.60;
 
-        // During rapid layout recycling, the Live Captions accessibility window
-        // can append the same completed tail row more than once. Suppress only an
-        // adjacent exact repeat with no draft evidence inside this short burst.
-        public static readonly TimeSpan AccessibilityDuplicateBurstWindow =
-            TimeSpan.FromSeconds(3);
-        public const int FinalAdmissionAliasCapacity = RecentLedgerCapacity * 4;
     }
 
     /// <summary>
@@ -190,11 +195,56 @@ namespace LiveCaptionsTranslator.services
             RecentMatchKind Kind,
             string ObservedText);
 
+        private sealed record RecentSnapshotEntry(
+            DateTimeOffset ObservedAt,
+            IReadOnlyList<Guid> CompletedSegmentIds,
+            Guid? DraftSegmentId);
+
+        private sealed class PendingCandidateEntry
+        {
+            public PendingCandidateEntry(
+                Guid candidateId,
+                Guid historicalSegmentId,
+                string text,
+                DateTimeOffset observedAt)
+            {
+                CandidateId = candidateId;
+                HistoricalSegmentId = historicalSegmentId;
+                Text = text;
+                FirstObservedAt = observedAt;
+                LastObservedAt = observedAt;
+            }
+
+            public Guid CandidateId { get; }
+            public Guid HistoricalSegmentId { get; }
+            public string Text { get; private set; }
+            public DateTimeOffset FirstObservedAt { get; }
+            public DateTimeOffset LastObservedAt { get; private set; }
+
+            public void Observe(string text, DateTimeOffset observedAt)
+            {
+                Text = text;
+                LastObservedAt = observedAt;
+            }
+
+            public PendingCaptionCandidate Snapshot()
+            {
+                return new PendingCaptionCandidate(
+                    CandidateId,
+                    HistoricalSegmentId,
+                    Text,
+                    FirstObservedAt,
+                    LastObservedAt);
+            }
+        }
+
         private static readonly char[] ClosingPunctuation =
             ['"', '\'', '”', '’', '»', '）', ')', '】', ']', '》', '〉', '}', '｝'];
 
         private readonly object stateLock = new();
         private readonly List<RecentSegmentEntry> recentSegments = [];
+        private readonly List<RecentSnapshotEntry> recentSnapshots = [];
+        private readonly List<PendingCandidateEntry> pendingCandidates = [];
         private List<LiveCaptionSegment> previousCompleted = [];
         private LiveCaptionSegment? activeDraft;
         private LiveCaptionSegment? lastFinal;
@@ -239,9 +289,6 @@ namespace LiveCaptionsTranslator.services
                 if (string.Equals(normalized, previousSnapshot, StringComparison.Ordinal))
                     return BuildUpdate(normalized, [], observedAt);
 
-                Dictionary<Guid, DateTimeOffset> previousLastSeen = recentSegments
-                    .ToDictionary(entry => entry.Segment.Id, entry => entry.LastSeenAt);
-
                 if (IsHistoricalTailDraftRollback(
                         completed,
                         observedDraft,
@@ -257,12 +304,27 @@ namespace LiveCaptionsTranslator.services
                 int alignmentLimit = draftCompletionIndex < 0
                     ? completed.Count
                     : draftCompletionIndex;
-                IReadOnlyList<RecentWindowMatch> recentMatches =
+                IReadOnlyList<RecentWindowMatch?> recentMatches =
                     FindRecentWindowMatches(completed, alignmentLimit);
-                int firstNewIndex = recentMatches.Count;
+                var resolvedCompleted = new LiveCaptionSegment?[completed.Count];
 
-                foreach (RecentWindowMatch match in recentMatches)
+                if (IsAmbiguousHistoricalOnlyWindow(
+                        completed,
+                        observedDraft,
+                        recentMatches))
                 {
+                    RememberPendingCandidate(
+                        completed[0],
+                        recentMatches[0]!.Entry.Segment.Id,
+                        observedAt);
+                }
+
+                for (int index = 0; index < alignmentLimit; index++)
+                {
+                    RecentWindowMatch? match = recentMatches[index];
+                    if (match == null)
+                        continue;
+
                     LiveCaptionSegment segment;
                     if (match.Kind == RecentMatchKind.Revision)
                     {
@@ -278,16 +340,17 @@ namespace LiveCaptionsTranslator.services
                         match.Entry.MarkSeen(observedAt);
                         segment = match.Entry.Segment;
                     }
-                    currentCompleted.Add(segment);
+                    resolvedCompleted[index] = segment;
                 }
 
-                if (recentMatches.Count == 0)
+                if (!recentMatches.Any(match => match != null))
                 {
                     int overlap = draftCompletionIndex == 0
                         ? 0
-                        : FindCompletedWindowOverlap(previousCompleted, completed);
+                        : FindCompletedWindowOverlap(
+                            previousCompleted,
+                            completed.Take(alignmentLimit).ToArray());
                     int previousOverlapStart = previousCompleted.Count - overlap;
-                    firstNewIndex = overlap;
 
                     for (int index = 0; index < overlap; index++)
                     {
@@ -296,7 +359,7 @@ namespace LiveCaptionsTranslator.services
                         string currentText = completed[index];
                         if (string.Equals(previous.Text, currentText, StringComparison.Ordinal))
                         {
-                            currentCompleted.Add(previous);
+                            resolvedCompleted[index] = previous;
                             continue;
                         }
 
@@ -308,7 +371,7 @@ namespace LiveCaptionsTranslator.services
                             RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
                                 candidate => candidate.Segment.Id == previous.Id);
                             entry?.MarkSeen(observedAt);
-                            currentCompleted.Add(previous);
+                            resolvedCompleted[index] = previous;
                             continue;
                         }
 
@@ -316,7 +379,7 @@ namespace LiveCaptionsTranslator.services
                             previous,
                             currentText,
                             observedAt);
-                        currentCompleted.Add(corrected);
+                        resolvedCompleted[index] = corrected;
 
                         if (lastFinal?.Id == corrected.Id &&
                             CaptionRevisionPolicy.IsRevision(previous.Text, currentText))
@@ -333,8 +396,7 @@ namespace LiveCaptionsTranslator.services
                         completed.Count > 0 &&
                         AreSameWindowSentence(lastFinal.Text, completed[0]))
                     {
-                        firstNewIndex = 1;
-                        currentCompleted.Add(lastFinal);
+                        resolvedCompleted[0] = lastFinal;
                     }
                     else if (overlap == 0 &&
                              draftCompletionIndex != 0 &&
@@ -346,13 +408,19 @@ namespace LiveCaptionsTranslator.services
                     {
                         // A clipped head fragment is anchored to the window edge
                         // and followed by genuinely new content.
-                        firstNewIndex = 1;
-                        currentCompleted.Add(previousCompleted[^1]);
+                        resolvedCompleted[0] = previousCompleted[^1];
                     }
                 }
 
-                for (int index = firstNewIndex; index < completed.Count; index++)
+                for (int index = 0; index < completed.Count; index++)
                 {
+                    LiveCaptionSegment? resolved = resolvedCompleted[index];
+                    if (resolved != null)
+                    {
+                        currentCompleted.Add(resolved);
+                        continue;
+                    }
+
                     string candidate = completed[index];
                     LiveCaptionSegment segment;
                     if (activeDraft != null &&
@@ -370,10 +438,22 @@ namespace LiveCaptionsTranslator.services
                         activeDraft = null;
                         activeDraftEligible = false;
                     }
-                    else if (IsRapidAccessibilityTailDuplicate(
+                    else if (index < alignmentLimit &&
+                             HasResolvedWindowContentAfter(
+                                 resolvedCompleted,
+                                 index,
+                                 alignmentLimit))
+                    {
+                        // A new recognizer row is appended at the logical right
+                        // edge. An unmatched row in front of already-mapped old
+                        // rows is therefore a correction/reorder ambiguity, not
+                        // proof of new speech. Keep the known suffix identities
+                        // and wait for a later frame with stronger evidence.
+                        continue;
+                    }
+                    else if (TryHoldAmbiguousHistoricalCandidate(
                                  candidate,
                                  currentCompleted,
-                                 previousLastSeen,
                                  observedAt))
                     {
                         continue;
@@ -381,6 +461,7 @@ namespace LiveCaptionsTranslator.services
                     else
                     {
                         segment = CreateSegment(candidate, isFinal: true, observedAt);
+                        ResolvePendingAsWindowReplay(currentCompleted);
                     }
 
                     currentCompleted.Add(segment);
@@ -389,10 +470,15 @@ namespace LiveCaptionsTranslator.services
                     RegisterRecentSegment(segment, observedAt);
                 }
 
+                bool frontierIsVisible = lastFinal != null &&
+                    currentCompleted.Any(segment => segment.Id == lastFinal.Id);
                 UpdateDraft(
                     observedDraft,
                     observedAt,
-                    canContinueFinal: completed.Count == 0,
+                    canContinueFinal:
+                        finalized.Count == 0 &&
+                        lastFinal != null &&
+                        !frontierIsVisible,
                     hasCompletedSentences:
                         finalized.Count > 0 ||
                         (activeDraft == null && currentCompleted.Count > 0));
@@ -414,6 +500,13 @@ namespace LiveCaptionsTranslator.services
         /// </summary>
         public void StartFromCurrentSnapshot(string? rawText)
         {
+            StartFromCurrentSnapshot(rawText, DateTimeOffset.UtcNow);
+        }
+
+        internal void StartFromCurrentSnapshot(
+            string? rawText,
+            DateTimeOffset observedAt)
+        {
             lock (stateLock)
             {
                 ClearState(suppressFirstSnapshot: false);
@@ -422,7 +515,7 @@ namespace LiveCaptionsTranslator.services
                     return;
 
                 var (completed, draft) = SplitSentences(normalized);
-                SeedWindow(completed, draft, DateTimeOffset.UtcNow);
+                SeedWindow(completed, draft, observedAt);
                 previousSnapshot = normalized;
             }
         }
@@ -447,42 +540,22 @@ namespace LiveCaptionsTranslator.services
             return -1;
         }
 
-        private bool IsRapidAccessibilityTailDuplicate(
-            string candidate,
-            IReadOnlyList<LiveCaptionSegment> currentCompleted,
-            IReadOnlyDictionary<Guid, DateTimeOffset> previousLastSeen,
-            DateTimeOffset observedAt)
+        internal int RecentSnapshotCount
         {
-            if (currentCompleted.Count == 0 ||
-                !HasExplicitSentenceEnding(candidate))
-                return false;
-
-            LiveCaptionSegment currentTail = currentCompleted[^1];
-            if (!string.Equals(
-                    NormalizeIdentityText(currentTail.Text),
-                    NormalizeIdentityText(candidate),
-                    StringComparison.OrdinalIgnoreCase))
+            get
             {
-                return false;
+                lock (stateLock)
+                    return recentSnapshots.Count;
             }
+        }
 
-            bool existedBeforeSnapshot = previousLastSeen.TryGetValue(
-                currentTail.Id,
-                out DateTimeOffset lastSeen);
-            bool createdInCurrentSnapshot =
-                !existedBeforeSnapshot && currentTail.CapturedAt == observedAt;
-            if (!createdInCurrentSnapshot &&
-                (!existedBeforeSnapshot ||
-                 observedAt < lastSeen ||
-                 observedAt - lastSeen >
-                    LiveCaptionSegmentationThresholds.AccessibilityDuplicateBurstWindow))
+        internal int PendingCandidateCount
+        {
+            get
             {
-                return false;
+                lock (stateLock)
+                    return pendingCandidates.Count;
             }
-
-            recentSegments.FirstOrDefault(
-                entry => entry.Segment.Id == currentTail.Id)?.MarkSeen(observedAt);
-            return true;
         }
 
         private static bool HasExplicitSentenceEnding(string text)
@@ -517,89 +590,446 @@ namespace LiveCaptionsTranslator.services
             return false;
         }
 
-        private IReadOnlyList<RecentWindowMatch> FindRecentWindowMatches(
+        private IReadOnlyList<RecentWindowMatch?> FindRecentWindowMatches(
             IReadOnlyList<string> completed,
             int matchLimit)
         {
+            var matches = new RecentWindowMatch?[Math.Max(0, matchLimit)];
             if (matchLimit <= 0 || recentSegments.Count == 0)
-                return [];
+                return matches;
 
-            List<RecentWindowMatch> best = [];
-            for (int start = recentSegments.Count - 1; start >= 0; start--)
+            var usedIds = new HashSet<Guid>();
+
+            // First retain identities that are still in the same accessibility
+            // window slot. This is the strongest evidence and preserves two
+            // genuine equal occurrences as two separate logical sentences.
+            for (int currentIndex = 0; currentIndex < matchLimit; currentIndex++)
             {
-                var candidateMatches = new List<RecentWindowMatch>();
-                int ledgerIndex = start;
-                for (int currentIndex = 0;
-                     currentIndex < matchLimit && ledgerIndex < recentSegments.Count;
-                     currentIndex++, ledgerIndex++)
-                {
-                    RecentSegmentEntry entry = recentSegments[ledgerIndex];
-                    string observedText = completed[currentIndex];
-                    RecentMatchKind? kind = ClassifyRecentMatch(
-                        entry,
-                        ledgerIndex,
-                        observedText,
-                        completed,
-                        currentIndex,
-                        matchLimit);
-                    if (!kind.HasValue)
-                        break;
+                string observedText = completed[currentIndex];
+                if (currentIndex >= previousCompleted.Count)
+                    continue;
 
-                    candidateMatches.Add(new RecentWindowMatch(
-                        entry,
-                        kind.Value,
-                        observedText));
+                Guid previousId = previousCompleted[currentIndex].Id;
+                RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                    candidate => candidate.Segment.Id == previousId);
+                if (entry == null)
+                    continue;
+
+                RecentMatchKind? kind = GetKnownTextMatchKind(
+                    entry,
+                    observedText,
+                    allowTruncatedHead: currentIndex == 0 && completed.Count > 1);
+                if (!kind.HasValue)
+                    continue;
+
+                matches[currentIndex] = new RecentWindowMatch(
+                    entry,
+                    kind.Value,
+                    observedText);
+                usedIds.Add(entry.Segment.Id);
+            }
+
+            // Align every remaining known occurrence across the whole window.
+            // Do not stop at the first changed row: Windows Live Captions keeps
+            // older rows visible after that row, and those suffix identities
+            // must survive a correction, rotation, or head truncation.
+            for (int currentIndex = 0; currentIndex < matchLimit; currentIndex++)
+            {
+                if (matches[currentIndex] != null)
+                    continue;
+
+                string observedText = completed[currentIndex];
+                RecentSegmentEntry? entry = recentSegments
+                    .Where(candidate => !usedIds.Contains(candidate.Segment.Id))
+                    .Where(candidate =>
+                        candidate.IsCurrentText(observedText) ||
+                        candidate.IsHistoricalRevision(observedText))
+                    .OrderByDescending(candidate =>
+                        IsSamePreviousWindowSlot(candidate, currentIndex))
+                    .ThenByDescending(candidate =>
+                        GetRecentSnapshotPositionScore(candidate, currentIndex))
+                    .ThenByDescending(candidate => candidate.IsCurrentText(observedText))
+                    .ThenByDescending(candidate => candidate.LastSeenAt)
+                    .ThenByDescending(candidate => candidate.Segment.Sequence)
+                    .FirstOrDefault();
+                if (entry == null)
+                    continue;
+
+                usedIds.Add(entry.Segment.Id);
+                matches[currentIndex] = new RecentWindowMatch(
+                    entry,
+                    entry.IsCurrentText(observedText)
+                        ? RecentMatchKind.Current
+                        : RecentMatchKind.HistoricalRevision,
+                    observedText);
+            }
+
+            // If one slot changed while neighboring slots retained their exact
+            // identities, it is a recognizer correction even when the wording
+            // changed too much for text similarity. This is the common source
+            // of 10 spoken sentences expanding into dozens of UI/database rows.
+            for (int currentIndex = 0; currentIndex < matchLimit; currentIndex++)
+            {
+                if (matches[currentIndex] != null ||
+                    currentIndex >= previousCompleted.Count)
+                {
+                    continue;
                 }
 
-                if (candidateMatches.Count > best.Count)
-                    best = candidateMatches;
+                Guid previousId = previousCompleted[currentIndex].Id;
+                if (usedIds.Contains(previousId))
+                    continue;
+
+                string observedText = completed[currentIndex];
+                bool textAlreadyRepresented = matches.Any(match =>
+                    match != null &&
+                    (match.Entry.IsCurrentText(observedText) ||
+                     match.Entry.IsHistoricalRevision(observedText)));
+                if (textAlreadyRepresented)
+                {
+                    // UI Automation can expose one physical caption row more
+                    // than once. A duplicate of an already aligned occurrence
+                    // is not a radical rewrite of the old sentence in this slot.
+                    continue;
+                }
+
+                int anchorCount = CountStablePreviousSlotAnchors(
+                    currentIndex,
+                    matches,
+                    matchLimit);
+                bool retainsWindowShape = matchLimit == previousCompleted.Count;
+                if (anchorCount == 0 ||
+                    (!retainsWindowShape && anchorCount < 2))
+                {
+                    continue;
+                }
+
+                RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                    candidate => candidate.Segment.Id == previousId);
+                if (entry == null)
+                    continue;
+
+                matches[currentIndex] = new RecentWindowMatch(
+                    entry,
+                    RecentMatchKind.Revision,
+                    observedText);
+                usedIds.Add(previousId);
             }
-            return best;
+
+            // Finally accept high-confidence textual revisions that moved with
+            // a rolling window. They need either logical-neighbor support, the
+            // same prior slot, or the current speech frontier; similarity alone
+            // is never used as a global de-duplication rule.
+            for (int currentIndex = 0; currentIndex < matchLimit; currentIndex++)
+            {
+                if (matches[currentIndex] != null)
+                    continue;
+
+                string observedText = completed[currentIndex];
+                RecentSegmentEntry? entry = recentSegments
+                    .Where(candidate => !usedIds.Contains(candidate.Segment.Id))
+                    .Where(candidate =>
+                        CaptionRevisionPolicy.IsRevision(
+                            candidate.Segment.Text,
+                            observedText) ||
+                        IsStrongPositionSupportedRevision(
+                            candidate.Segment.Text,
+                            observedText))
+                    .Where(candidate =>
+                        IsSamePreviousWindowSlot(candidate, currentIndex) ||
+                        CountLogicalNeighborAnchors(
+                            candidate,
+                            currentIndex,
+                            matches,
+                            matchLimit) > 0 ||
+                        lastFinal?.Id == candidate.Segment.Id)
+                    .OrderByDescending(candidate =>
+                        IsSamePreviousWindowSlot(candidate, currentIndex))
+                    .ThenByDescending(candidate => CountLogicalNeighborAnchors(
+                        candidate,
+                        currentIndex,
+                        matches,
+                        matchLimit))
+                    .ThenByDescending(candidate =>
+                        lastFinal?.Id == candidate.Segment.Id)
+                    .ThenByDescending(candidate =>
+                        GetRecentSnapshotPositionScore(candidate, currentIndex))
+                    .ThenByDescending(candidate => candidate.LastSeenAt)
+                    .ThenByDescending(candidate => candidate.Segment.Sequence)
+                    .FirstOrDefault();
+                if (entry == null)
+                    continue;
+
+                matches[currentIndex] = new RecentWindowMatch(
+                    entry,
+                    RecentMatchKind.Revision,
+                    observedText);
+                usedIds.Add(entry.Segment.Id);
+            }
+
+            return matches;
         }
 
-        private RecentMatchKind? ClassifyRecentMatch(
+        private static RecentMatchKind? GetKnownTextMatchKind(
             RecentSegmentEntry entry,
-            int ledgerIndex,
             string observedText,
-            IReadOnlyList<string> completed,
-            int currentIndex,
-            int matchLimit)
+            bool allowTruncatedHead)
         {
             if (entry.IsCurrentText(observedText))
                 return RecentMatchKind.Current;
             if (entry.IsHistoricalRevision(observedText))
                 return RecentMatchKind.HistoricalRevision;
-
-            if (currentIndex == 0 && completed.Count > 1 &&
+            if (allowTruncatedHead &&
                 IsLikelyTruncatedLeadingFinal(entry.Segment.Text, observedText))
             {
                 return RecentMatchKind.TruncatedWindowHead;
             }
-
-            bool hasLeftContext = currentIndex > 0;
-            bool hasRightContext =
-                currentIndex + 1 < matchLimit &&
-                ledgerIndex + 1 < recentSegments.Count &&
-                IsKnownRevisionText(
-                    recentSegments[ledgerIndex + 1],
-                    completed[currentIndex + 1]);
-            bool isCurrentTailSlot =
-                matchLimit == 1 && ledgerIndex == recentSegments.Count - 1;
-            if (!(hasLeftContext || hasRightContext || isCurrentTailSlot))
-                return null;
-
-            return CaptionRevisionPolicy.IsRevision(entry.Segment.Text, observedText) ||
-                   IsStrongPositionSupportedRevision(entry.Segment.Text, observedText)
-                ? RecentMatchKind.Revision
-                : null;
+            return null;
         }
 
-        private static bool IsKnownRevisionText(
-            RecentSegmentEntry entry,
-            string observedText)
+        private int CountStablePreviousSlotAnchors(
+            int currentIndex,
+            IReadOnlyList<RecentWindowMatch?> matches,
+            int matchLimit)
         {
-            return entry.IsCurrentText(observedText) ||
-                   entry.IsHistoricalRevision(observedText);
+            int count = 0;
+            if (currentIndex > 0 &&
+                matches[currentIndex - 1]?.Entry.Segment.Id ==
+                    previousCompleted[currentIndex - 1].Id)
+            {
+                count++;
+            }
+            if (currentIndex + 1 < matchLimit &&
+                currentIndex + 1 < previousCompleted.Count &&
+                matches[currentIndex + 1]?.Entry.Segment.Id ==
+                    previousCompleted[currentIndex + 1].Id)
+            {
+                count++;
+            }
+            return count;
+        }
+
+        private int CountLogicalNeighborAnchors(
+            RecentSegmentEntry entry,
+            int currentIndex,
+            IReadOnlyList<RecentWindowMatch?> matches,
+            int matchLimit)
+        {
+            int previousIndex = previousCompleted.FindIndex(
+                segment => segment.Id == entry.Segment.Id);
+            if (previousIndex < 0)
+                return 0;
+
+            int count = 0;
+            if (previousIndex > 0 && currentIndex > 0 &&
+                matches[currentIndex - 1]?.Entry.Segment.Id ==
+                    previousCompleted[previousIndex - 1].Id)
+            {
+                count++;
+            }
+            if (previousIndex + 1 < previousCompleted.Count &&
+                currentIndex + 1 < matchLimit &&
+                matches[currentIndex + 1]?.Entry.Segment.Id ==
+                    previousCompleted[previousIndex + 1].Id)
+            {
+                count++;
+            }
+            return count;
+        }
+
+        private static bool HasResolvedWindowContentAfter(
+            IReadOnlyList<LiveCaptionSegment?> resolved,
+            int currentIndex,
+            int matchLimit)
+        {
+            for (int index = currentIndex + 1; index < matchLimit; index++)
+            {
+                if (resolved[index] != null)
+                    return true;
+            }
+            return false;
+        }
+
+        private bool IsSamePreviousWindowSlot(
+            RecentSegmentEntry entry,
+            int currentIndex)
+        {
+            return currentIndex < previousCompleted.Count &&
+                   previousCompleted[currentIndex].Id == entry.Segment.Id;
+        }
+
+        private int GetRecentSnapshotPositionScore(
+            RecentSegmentEntry entry,
+            int currentIndex)
+        {
+            for (int index = recentSnapshots.Count - 1; index >= 0; index--)
+            {
+                IReadOnlyList<Guid> ids = recentSnapshots[index].CompletedSegmentIds;
+                int priorPosition = -1;
+                for (int position = 0; position < ids.Count; position++)
+                {
+                    if (ids[position] == entry.Segment.Id)
+                    {
+                        priorPosition = position;
+                        break;
+                    }
+                }
+
+                if (priorPosition >= 0)
+                    return priorPosition == currentIndex ? 2 : 1;
+            }
+            return 0;
+        }
+
+        private bool IsAmbiguousHistoricalOnlyWindow(
+            IReadOnlyList<string> completed,
+            string observedDraft,
+            IReadOnlyList<RecentWindowMatch?> matches)
+        {
+            if (completed.Count != 1 ||
+                observedDraft.Length != 0 ||
+                activeDraft != null ||
+                matches.Count != 1 ||
+                lastFinal == null ||
+                matches[0] == null ||
+                matches[0]!.Entry.Segment.Id == lastFinal.Id ||
+                previousCompleted.Count != 1 ||
+                previousCompleted[0].Id != lastFinal.Id)
+            {
+                return false;
+            }
+
+            return matches[0]!.Kind is RecentMatchKind.Current or
+                RecentMatchKind.HistoricalRevision;
+        }
+
+        private bool TryHoldAmbiguousHistoricalCandidate(
+            string candidate,
+            IReadOnlyList<LiveCaptionSegment> currentCompleted,
+            DateTimeOffset observedAt)
+        {
+            // Deterministic reading units from one long unpunctuated snapshot
+            // are forward content even when two adjacent units happen to have
+            // identical words. Ambiguity applies only to recognizer finals.
+            if (!HasExplicitSentenceEnding(candidate))
+                return false;
+
+            RecentSegmentEntry? historical = recentSegments
+                .Where(entry =>
+                    entry.IsCurrentText(candidate) ||
+                    entry.IsHistoricalRevision(candidate))
+                .OrderByDescending(entry => entry.LastSeenAt)
+                .ThenByDescending(entry => entry.Segment.Sequence)
+                .FirstOrDefault();
+            if (historical == null ||
+                HasTrustedRightEdgeAppendEvidence(
+                    currentCompleted,
+                    historical.Segment.Id))
+            {
+                return false;
+            }
+
+            RememberPendingCandidate(
+                candidate,
+                historical.Segment.Id,
+                observedAt);
+            historical.MarkSeen(observedAt);
+            return true;
+        }
+
+        private bool HasTrustedRightEdgeAppendEvidence(
+            IReadOnlyList<LiveCaptionSegment> currentCompleted,
+            Guid repeatedHistoricalId)
+        {
+            RecentSnapshotEntry? previous = recentSnapshots.LastOrDefault();
+            if (previous == null ||
+                previous.CompletedSegmentIds.Count < 2 ||
+                currentCompleted.Count != previous.CompletedSegmentIds.Count ||
+                currentCompleted[^1].Id == repeatedHistoricalId)
+            {
+                return false;
+            }
+
+            for (int index = 0;
+                 index < previous.CompletedSegmentIds.Count;
+                 index++)
+            {
+                if (previous.CompletedSegmentIds[index] != currentCompleted[index].Id)
+                    return false;
+            }
+            return true;
+        }
+
+        private void RememberPendingCandidate(
+            string text,
+            Guid historicalSegmentId,
+            DateTimeOffset observedAt)
+        {
+            string normalized = NormalizeIdentityText(text);
+            PendingCandidateEntry? existing = pendingCandidates.FirstOrDefault(
+                candidate =>
+                    candidate.HistoricalSegmentId == historicalSegmentId &&
+                    string.Equals(
+                        NormalizeIdentityText(candidate.Text),
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase));
+            if (existing != null)
+            {
+                existing.Observe(text, observedAt);
+                return;
+            }
+
+            pendingCandidates.Add(new PendingCandidateEntry(
+                Guid.NewGuid(),
+                historicalSegmentId,
+                text,
+                observedAt));
+            while (pendingCandidates.Count >
+                   LiveCaptionSegmentationThresholds.PendingCandidateCapacity)
+            {
+                pendingCandidates.RemoveAt(0);
+            }
+        }
+
+        private void ResolvePendingAsWindowReplay(
+            IReadOnlyList<LiveCaptionSegment> currentCompleted)
+        {
+            if (currentCompleted.Count == 0 || pendingCandidates.Count == 0)
+                return;
+
+            HashSet<Guid> visibleIds = currentCompleted
+                .Select(segment => segment.Id)
+                .ToHashSet();
+            pendingCandidates.RemoveAll(candidate =>
+                visibleIds.Contains(candidate.HistoricalSegmentId));
+        }
+
+        private LiveCaptionSegment? TryTakePendingContinuation(
+            string observedDraft)
+        {
+            PendingCandidateEntry? pending = pendingCandidates
+                .LastOrDefault(candidate =>
+                    IsStrictLexicalGrowth(candidate.Text, observedDraft));
+            if (pending == null)
+                return null;
+
+            pendingCandidates.Remove(pending);
+            return new LiveCaptionSegment(
+                pending.CandidateId,
+                ++nextSequence,
+                1,
+                observedDraft,
+                false,
+                pending.FirstObservedAt);
+        }
+
+        private static bool IsStrictLexicalGrowth(string previous, string current)
+        {
+            string left = NormalizeLexicalText(previous);
+            string right = NormalizeLexicalText(current);
+            return right.Length > left.Length &&
+                   HasShortTailEvidence(left) &&
+                   IsLexicalPrefixAtBoundary(right, left);
         }
 
         private static bool IsStrongPositionSupportedRevision(
@@ -745,6 +1175,40 @@ namespace LiveCaptionsTranslator.services
                 observedAt >= entry.LastForwardObservedAt &&
                 observedAt - entry.LastForwardObservedAt >
                     LiveCaptionSegmentationThresholds.RecentLedgerRetention);
+            recentSnapshots.RemoveAll(snapshot =>
+                observedAt >= snapshot.ObservedAt &&
+                observedAt - snapshot.ObservedAt >
+                    LiveCaptionSegmentationThresholds.RecentLedgerRetention);
+            pendingCandidates.RemoveAll(candidate =>
+                observedAt >= candidate.LastObservedAt &&
+                observedAt - candidate.LastObservedAt >
+                    LiveCaptionSegmentationThresholds.RecentLedgerRetention);
+        }
+
+        private void RememberSnapshot(DateTimeOffset observedAt)
+        {
+            Guid[] completedIds = previousCompleted
+                .Select(segment => segment.Id)
+                .ToArray();
+            Guid? draftId = activeDraft?.Id;
+            RecentSnapshotEntry? previous = recentSnapshots.LastOrDefault();
+            if (previous != null &&
+                previous.DraftSegmentId == draftId &&
+                previous.CompletedSegmentIds.SequenceEqual(completedIds))
+            {
+                recentSnapshots[^1] = previous with { ObservedAt = observedAt };
+                return;
+            }
+
+            recentSnapshots.Add(new RecentSnapshotEntry(
+                observedAt,
+                completedIds,
+                draftId));
+            while (recentSnapshots.Count >
+                   LiveCaptionSegmentationThresholds.RecentSnapshotCapacity)
+            {
+                recentSnapshots.RemoveAt(0);
+            }
         }
 
         private static string NormalizeIdentityText(string text)
@@ -777,6 +1241,8 @@ namespace LiveCaptionsTranslator.services
         {
             previousCompleted = [];
             recentSegments.Clear();
+            recentSnapshots.Clear();
+            pendingCandidates.Clear();
             activeDraft = null;
             lastFinal = null;
             previousSnapshot = string.Empty;
@@ -804,20 +1270,28 @@ namespace LiveCaptionsTranslator.services
 
             if (activeDraft == null)
             {
+                LiveCaptionSegment? pendingContinuation =
+                    TryTakePendingContinuation(observedDraft);
+                if (pendingContinuation != null)
+                {
+                    activeDraft = pendingContinuation;
+                    activeDraftChangedAt = observedAt;
+                    activeDraftEligible = true;
+                    return;
+                }
+
                 // Temporary terminal punctuation can disappear as the same
                 // tail continues. Explicit appended drafts and new short-prefix
                 // utterances must still receive their own identity.
                 RecentSegmentEntry? continuationEntry = null;
                 if (canContinueFinal &&
-                    lastFinal != null &&
-                    previousCompleted.LastOrDefault()?.Id == lastFinal.Id)
+                    lastFinal != null)
                 {
                     continuationEntry = recentSegments.FirstOrDefault(
                         entry => entry.Segment.Id == lastFinal.Id);
                 }
                 bool continuesFinal = canContinueFinal &&
                     lastFinal != null &&
-                    previousCompleted.LastOrDefault()?.Id == lastFinal.Id &&
                     continuationEntry != null &&
                     NormalizeLexicalText(observedDraft).Length >
                         NormalizeLexicalText(lastFinal.Text).Length &&
@@ -1015,6 +1489,7 @@ namespace LiveCaptionsTranslator.services
                 : forwardTail;
             LiveCaptionSegment? currentSegment = activeDraft ?? stableTail ?? forwardTail;
             string currentText = currentSegment?.Text ?? string.Empty;
+            RememberSnapshot(observedAt);
             return new LiveCaptionUpdate(
                 normalized,
                 finalized,
@@ -1022,7 +1497,9 @@ namespace LiveCaptionsTranslator.services
                 currentSegment,
                 currentText,
                 activeDraftEligible,
-                stableFor < TimeSpan.Zero ? TimeSpan.Zero : stableFor);
+                stableFor < TimeSpan.Zero ? TimeSpan.Zero : stableFor,
+                pendingCandidates.Select(candidate => candidate.Snapshot()).ToArray(),
+                previousCompleted.Select(segment => segment.Id).ToArray());
         }
 
         private LiveCaptionSegment CreateSegment(

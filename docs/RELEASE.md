@@ -1,6 +1,6 @@
 # Translate Live build and release guide
 
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 
 ## Release status
 
@@ -14,7 +14,7 @@ Verified local baseline:
 - .NET SDK 10.0.400;
 - locked dependency restoration;
 - Release build successful;
-- 167 automated tests passing;
+- 185 automated tests passing;
 - self-contained win-x64 publish successful;
 - Windows Live Captions system-audio and microphone smoke checks successful in an isolated data root.
 - real WPF timeline smoke checks successful for queued-scroll cancellation, reading-anchor preservation, return-to-live, long-draft height, font enlargement, and window resizing.
@@ -48,21 +48,31 @@ Rapid-continuity regression evidence:
 - a rapid 13-frame continuous-speech replay covering provisional punctuation, temporary shortening, restoration, and long growth finishes with one identity, its first capture time, one workspace row, and one isolated SQLite row;
 - appended different sentences, repeated speech that begins from a new short draft, and short-prefix growth outside the evidence window remain separate identities.
 
-Accessibility duplicate-burst regression evidence:
+Whole-window identity regression evidence:
 
-- before the fix, the screenshot-derived replay `previous sentence → current sentence → current sentence ×2 → current sentence ×3` emitted four identities, made four translation calls, displayed four rows, and persisted four SQLite rows;
-- the repaired production chain emits the previous sentence and current sentence once each, producing two identities, two translation calls, two workspace rows, and two isolated SQLite rows; adjacent repeats already present in the same accessibility snapshot are also collapsed before translation;
-- Unicode direction and zero-width format marks exposed by UI Automation no longer change normalized caption identity text;
-- a real repeated utterance is still retained when a fresh draft grows, a different sentence intervenes, or an exact append occurs outside the three-second accessibility burst;
-- this classification does not wait before submitting ordinary final captions and does not rewrite existing classroom history.
+- before this fix, the production replay `[A,B,C] -> [B,C,A]` treated the rotated old `A` as forward speech and finished with four logical identities, four translation requests, four workspace rows, and four isolated SQLite rows;
+- the repaired replay first aligns the complete accessibility window and finishes with exactly three identities, three requests, three workspace rows, and three SQLite rows (`4/4/4/4 -> 3/3/3/3`);
+- repeated rotation in either direction, head truncation, and historical revisions reuse their existing occurrence identities one-to-one; two genuinely established equal utterances remain two identities when the window later reorders;
+- a punctuation-finalized current sentence that reappears without punctuation and keeps growing retains its original `SegmentId`, `Sequence`, and `CapturedAt`, including when older completed rows remain visible;
+- an isolated `A -> B -> A` without a draft trajectory or trusted append position is held as a bounded pending candidate. Waiting alone never promotes it; strict draft growth can establish a new occurrence with the pending candidate's first observation time, while expired evidence closes without emitting speech;
+- the final-admission gate now validates only resolved `SegmentId` and `Revision`. It no longer creates text aliases or uses a three-second timeout, intervening text, or revision number as a second identity classifier;
+- Unicode direction and zero-width format marks exposed by UI Automation do not change normalized caption identity text, and no fixed delay is added before ordinary final captions are submitted.
 
-Final-admission regression evidence:
+Continuous-window correction regression evidence:
 
-- the screenshot-derived production replay supplies four visually and textually identical completed candidates with four different local identities between `23:19:05.000` and `23:19:06.050`;
-- before the final-admission fix, the real queue/view-model/persistence chain made four translation calls, displayed four rows, and wrote four isolated SQLite rows;
-- after the fix, the same replay makes one translation call, displays one row, and writes one isolated SQLite row; continuously recycled exact candidates every 250 ms for ten seconds also remain one logical final;
-- the gate runs before translation, display history, overlay context, and persistence and adds no fixed waiting period;
-- a same-identity revision, a repeated utterance with fresh draft evidence, a repeat after an intervening different final, a repeat after a quiet gap, and a new classroom session remain independently admitted.
+- before the full-position alignment fix, rewriting the fifth row of a ten-sentence Live Captions window stopped matching at that row, retained only five window identities, and assigned the correction a new `SegmentId`;
+- the repaired resolver keeps all ten window identities and emits the changed row as revision `1` of its original identity;
+- a progressive twelve-sentence replay with 24 complete rewrites of one interior sentence, a full-window rotation, another interior correction, and one genuine append finishes with 13 logical identities for 13 spoken sentences;
+- an 80-sentence continuous replay using a ten-row rolling window and periodic rotations produces exactly 80 identities and no replay identities;
+- the production queue, workspace view model, and isolated SQLite repository process ten spoken sentences plus 18 accepted revisions as ten workspace rows and ten database rows. Revision events update their established identity instead of adding scrollback rows;
+- accessibility duplicate rows that repeat an already aligned occurrence are excluded from position-based rewrite handling, preserving the existing duplicate-burst regressions.
+
+Downstream identity evidence:
+
+- the classroom session identifier is captured when a caption enters the translation queue, so a delayed provider result cannot be written to a classroom selected later;
+- stale translation revisions and stale final revisions cannot overwrite a newer revision of the same identity;
+- when SQLite history projection interleaves with the corresponding real-time event, the temporary projected UI identity is rebound to the stable live identity instead of creating a second timeline row;
+- existing classroom history is not text-deduplicated, rewritten, or deleted by this change.
 
 ## Supported release target
 

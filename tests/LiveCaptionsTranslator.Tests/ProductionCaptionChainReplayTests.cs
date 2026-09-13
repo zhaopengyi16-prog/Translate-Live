@@ -156,54 +156,53 @@ namespace LiveCaptionsTranslator.Tests
                     Interlocked.Increment(ref persistedCallbacks);
                 });
                 var viewModel = new TranscriptSessionViewModel();
-                var admissionGate = new FinalCaptionAdmissionGate();
+                var resolver = new LiveCaptionIdentityResolver();
                 DateTimeOffset start = new(2026, 9, 13, 23, 19, 5, TimeSpan.Zero);
                 const string repeatedText =
                     "Everything else kind of face into the background.";
-                LiveCaptionSegment[] candidates =
+                (string Text, DateTimeOffset At)[] snapshots =
                 [
-                    new(Guid.NewGuid(), 1, 0, repeatedText, true, start),
-                    new(Guid.NewGuid(), 2, 0, repeatedText, true,
+                    (repeatedText, start),
+                    ($"{repeatedText} {repeatedText}",
                         start.AddMilliseconds(180)),
-                    new(Guid.NewGuid(), 3, 0, repeatedText, true,
+                    ($"{repeatedText} {repeatedText} {repeatedText}",
                         start.AddMilliseconds(420)),
-                    new(Guid.NewGuid(), 4, 0, repeatedText, true,
+                    ($"{repeatedText} {repeatedText} {repeatedText} {repeatedText}",
                         start.AddMilliseconds(1050))
                 ];
                 int admittedCandidates = 0;
 
-                foreach (LiveCaptionSegment segment in candidates)
+                foreach ((string snapshot, DateTimeOffset observedAt) in snapshots)
                 {
-                    FinalCaptionAdmissionDecision decision =
-                        admissionGate.Evaluate(segment, segment.CapturedAt);
-                    if (!decision.IsAdmitted)
-                        continue;
-
-                    admittedCandidates++;
-                    queue.Enqueue(
-                        (_, _) =>
-                        {
-                            Interlocked.Increment(ref translationCalls);
-                            return Task.FromResult<(string, bool)>(
-                                ("其他一切都在某种程度上退居背景。", true));
-                        },
-                        segment.Text,
-                        "Fake",
-                        session.Id,
-                        "zh-CN",
-                        Identity(segment),
-                        waitForPersistence: true);
-                    TranslationQueueResult result = await queue.ReadLatestResultAsync()
-                        .AsTask()
-                        .WaitAsync(TimeSpan.FromSeconds(2));
-                    viewModel.ApplySegment(new TranscriptSegment(
-                        result.Identity!.SegmentId,
-                        result.Identity.Sequence,
-                        result.Identity.Revision,
-                        result.OriginalText,
-                        result.TranslatedText,
-                        SegmentState.Translated,
-                        result.Identity.CapturedAt));
+                    LiveCaptionUpdate update = resolver.Process(snapshot, observedAt);
+                    foreach (LiveCaptionSegment segment in update.FinalizedSegments)
+                    {
+                        admittedCandidates++;
+                        queue.Enqueue(
+                            (_, _) =>
+                            {
+                                Interlocked.Increment(ref translationCalls);
+                                return Task.FromResult<(string, bool)>(
+                                    ("其他一切都在某种程度上退居背景。", true));
+                            },
+                            segment.Text,
+                            "Fake",
+                            session.Id,
+                            "zh-CN",
+                            Identity(segment),
+                            waitForPersistence: true);
+                        TranslationQueueResult result = await queue.ReadLatestResultAsync()
+                            .AsTask()
+                            .WaitAsync(TimeSpan.FromSeconds(2));
+                        viewModel.ApplySegment(new TranscriptSegment(
+                            result.Identity!.SegmentId,
+                            result.Identity.Sequence,
+                            result.Identity.Revision,
+                            result.OriginalText,
+                            result.TranslatedText,
+                            SegmentState.Translated,
+                            result.Identity.CapturedAt));
+                    }
                 }
 
                 await WaitUntilAsync(() =>

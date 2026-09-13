@@ -244,6 +244,46 @@ namespace LiveCaptionsTranslator.viewmodels
             return true;
         }
 
+        public bool RebindSegmentIdentity(
+            Guid projectedId,
+            TranscriptSegment canonical)
+        {
+            if (projectedId == canonical.Id)
+            {
+                ApplySegment(canonical);
+                return true;
+            }
+
+            if (!segmentsById.TryGetValue(projectedId, out var projected))
+            {
+                ApplySegment(canonical);
+                return false;
+            }
+
+            if (segmentsById.TryGetValue(canonical.Id, out var existingCanonical))
+            {
+                existingCanonical.Apply(canonical);
+                Segments.Remove(projected);
+                segmentsById.Remove(projectedId);
+                OnPropertyChanged(nameof(IsEmpty));
+                return true;
+            }
+
+            int projectedIndex = Segments.IndexOf(projected);
+            var rebound = new TranscriptSegmentViewModel(canonical);
+            Segments[projectedIndex] = rebound;
+            segmentsById.Remove(projectedId);
+            segmentsById[canonical.Id] = rebound;
+
+            int targetIndex = Segments
+                .OrderBy(segment => segment.Sequence)
+                .ToList()
+                .IndexOf(rebound);
+            if (projectedIndex != targetIndex)
+                Segments.Move(projectedIndex, targetIndex);
+            return true;
+        }
+
         public void SetDraft(TranscriptSegment? draft)
         {
             if (draft == null)

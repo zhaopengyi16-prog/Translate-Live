@@ -210,7 +210,7 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public void SameSentenceSpokenTwiceGetsTwoSegmentIdentities()
+        public void SameTextWithoutForwardEvidenceRemainsPendingEvenAfterTime()
         {
             var segmenter = new LiveCaptionSegmenter();
             var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
@@ -218,15 +218,14 @@ namespace LiveCaptionsTranslator.Tests
 
             LiveCaptionUpdate second = segmenter.Process(
                 "Hello. Hello.",
-                start +
-                    LiveCaptionSegmentationThresholds.AccessibilityDuplicateBurstWindow +
-                    TimeSpan.FromMilliseconds(1));
+                start.AddMinutes(1));
 
             Assert.HasCount(1, first.FinalizedSegments);
-            Assert.HasCount(1, second.FinalizedSegments);
-            Assert.AreNotEqual(
+            Assert.IsEmpty(second.FinalizedSegments);
+            Assert.HasCount(1, second.PendingCandidates);
+            Assert.AreEqual(
                 first.FinalizedSegments[0].Id,
-                second.FinalizedSegments[0].Id);
+                second.PendingCandidates[0].HistoricalSegmentId);
         }
 
         [TestMethod]
@@ -597,26 +596,26 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public void ExplicitWindowAppendAfterBurstWindowPreservesARepeatedUtterance()
+        public void FullWindowAppendAfterDifferentSentencePreservesARepeat()
         {
             var segmenter = new LiveCaptionSegmenter();
             var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
-            LiveCaptionSegment first = segmenter.Process("Hello.", start)
-                .FinalizedSegments.Single();
+            LiveCaptionUpdate firstWindow = segmenter.Process(
+                "Hello. A different sentence.",
+                start);
+            LiveCaptionSegment first = firstWindow.FinalizedSegments[0];
 
             LiveCaptionSegment repeated = segmenter.Process(
-                "Hello. Hello.",
-                start +
-                    LiveCaptionSegmentationThresholds.AccessibilityDuplicateBurstWindow +
-                    TimeSpan.FromMilliseconds(1))
+                "Hello. A different sentence. Hello.",
+                start.AddMilliseconds(200))
                 .FinalizedSegments.Single();
 
             Assert.AreNotEqual(first.Id, repeated.Id);
-            Assert.AreEqual(2, repeated.Sequence);
+            Assert.AreEqual(3, repeated.Sequence);
         }
 
         [TestMethod]
-        public void InterveningSentencePreservesAnImmediateRepeatedUtterance()
+        public void IsolatedAThenBThenAWithoutForwardEvidenceRemainsPending()
         {
             var segmenter = new LiveCaptionSegmenter();
             var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
@@ -624,16 +623,19 @@ namespace LiveCaptionsTranslator.Tests
                 "I can speak with you.",
                 start).FinalizedSegments.Single();
             LiveCaptionSegment middle = segmenter.Process(
-                "I can speak with you. A different sentence.",
+                "A different sentence.",
                 start.AddMilliseconds(500)).FinalizedSegments.Single();
 
-            LiveCaptionSegment repeated = segmenter.Process(
-                "A different sentence. I can speak with you.",
-                start.AddSeconds(1)).FinalizedSegments.Single();
+            LiveCaptionUpdate ambiguous = segmenter.Process(
+                "I can speak with you.",
+                start.AddSeconds(1));
 
             Assert.AreNotEqual(first.Id, middle.Id);
-            Assert.AreNotEqual(first.Id, repeated.Id);
-            Assert.AreNotEqual(middle.Id, repeated.Id);
+            Assert.IsEmpty(ambiguous.FinalizedSegments);
+            Assert.HasCount(1, ambiguous.PendingCandidates);
+            Assert.AreEqual(
+                first.Id,
+                ambiguous.PendingCandidates[0].HistoricalSegmentId);
         }
 
         [TestMethod]

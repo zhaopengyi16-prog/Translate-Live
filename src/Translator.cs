@@ -10,12 +10,13 @@ using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator
 {
+    internal sealed record CaptionTranslationSubmission(
+        TranslationTaskIdentity Identity,
+        string Text,
+        long? SessionId);
+
     public static class Translator
     {
-        private sealed record CaptionTranslationSubmission(
-            TranslationTaskIdentity Identity,
-            string Text);
-
         private static AutomationElement? window = null;
         private static Caption? caption = null;
         private static Setting? setting = null;
@@ -24,8 +25,7 @@ namespace LiveCaptionsTranslator
             pendingTextQueue = new();
         private static readonly TranslationTaskQueue translationTaskQueue =
             new(acceptedResultHandler: ApplyAcceptedContext);
-        private static readonly LiveCaptionSegmenter captionSegmenter = new();
-        private static readonly FinalCaptionAdmissionGate finalCaptionAdmissionGate = new();
+        private static readonly LiveCaptionIdentityResolver captionIdentityResolver = new();
         private static readonly LiveCaptionsConnectionPolicy liveCaptionsConnectionPolicy = new();
         private static readonly SemaphoreSlim liveCaptionsConnectionGate = new(1, 1);
         private static readonly TranslationSegmentPersistence segmentPersistence = new(
@@ -138,8 +138,7 @@ namespace LiveCaptionsTranslator
                             exception);
                     }
                 }
-                captionSegmenter.StartFromCurrentSnapshot(existingSnapshot);
-                finalCaptionAdmissionGate.Reset();
+                captionIdentityResolver.StartFromCurrentSnapshot(existingSnapshot);
                 captionState.DisplayTranslatedCaption = string.Empty;
                 Window = connectedWindow;
                 ProductDiagnostics.Write(userInitiated
@@ -212,8 +211,7 @@ namespace LiveCaptionsTranslator
                 {
                     LiveCaptionsHandler.NotifyWindowUnavailable();
                     Window = null;
-                    captionSegmenter.Reset();
-                    finalCaptionAdmissionGate.Reset();
+                    captionIdentityResolver.Reset();
                     Caption?.DisplayTranslatedCaption =
                         "[状态] Windows 实时字幕已关闭，请在菜单中重新连接。";
                     ProductDiagnostics.Write("livecaptions.disconnected", exception);
@@ -229,47 +227,14 @@ namespace LiveCaptionsTranslator
                 // Preserve the recognizer's words and punctuation. The segmenter
                 // normalizes only visual whitespace so decimals, acronyms, and
                 // technical identifiers are not rewritten before translation.
-                LiveCaptionUpdate update = captionSegmenter.Process(fullText);
                 DateTimeOffset observedAt = DateTimeOffset.UtcNow;
-
+                LiveCaptionUpdate update = captionIdentityResolver.Process(
+                    fullText,
+                    observedAt);
                 LiveCaptionSegment? draftSegment = update.DraftSegment;
-                if (draftSegment != null)
-                    finalCaptionAdmissionGate.ObserveDraft(draftSegment, observedAt);
-
-                var admittedFinals = new List<LiveCaptionSegment>(
-                    update.FinalizedSegments.Count);
-                var canonicalMappings = new Dictionary<Guid, LiveCaptionSegment>();
-                foreach (LiveCaptionSegment finalizedSegment in update.FinalizedSegments)
-                {
-                    FinalCaptionAdmissionDecision decision =
-                        finalCaptionAdmissionGate.Evaluate(finalizedSegment, observedAt);
-                    if (decision.CanonicalSegment.Id != finalizedSegment.Id)
-                    {
-                        canonicalMappings[finalizedSegment.Id] =
-                            decision.CanonicalSegment;
-                    }
-                    if (decision.IsAdmitted)
-                    {
-                        admittedFinals.Add(decision.CanonicalSegment);
-                    }
-                    else
-                    {
-                        canonicalMappings[finalizedSegment.Id] =
-                            decision.CanonicalSegment;
-                        ProductDiagnostics.Write("caption.final-duplicate-suppressed");
-                    }
-                }
 
                 string currentCaption = update.CurrentText;
                 LiveCaptionSegment? currentSegment = update.CurrentSegment;
-                if (currentSegment != null &&
-                    canonicalMappings.TryGetValue(
-                        currentSegment.Id,
-                        out LiveCaptionSegment? canonicalSegment))
-                {
-                    currentSegment = canonicalSegment;
-                    currentCaption = canonicalSegment.Text;
-                }
                 if (currentCaption.Length > 0 && currentSegment != null)
                 {
                     var currentIdentity = ToIdentity(currentSegment);
@@ -290,13 +255,14 @@ namespace LiveCaptionsTranslator
 
                 // A final sentence is queued exactly once. In particular, an idle
                 // timer must not submit the same completed sentence again.
-                foreach (LiveCaptionSegment finalizedSegment in admittedFinals)
+                foreach (LiveCaptionSegment finalizedSegment in update.FinalizedSegments)
                 {
                     Caption.OriginalCaption = finalizedSegment.Text;
                     var identity = ToIdentity(finalizedSegment);
                     pendingTextQueue.Enqueue(new CaptionTranslationSubmission(
                         identity,
-                        finalizedSegment.Text));
+                        finalizedSegment.Text,
+                        LectureSessionTracker.CurrentSessionId));
                     TranscriptSegmentChanged?.Invoke(ToTranscriptSegment(
                         finalizedSegment,
                         translatedText: null,
@@ -358,7 +324,10 @@ namespace LiveCaptionsTranslator
                     {
                         syncCount = 0;
                         var identity = ToIdentity(draftSegment);
-                        pendingTextQueue.Enqueue(new CaptionTranslationSubmission(identity, draft));
+                        pendingTextQueue.Enqueue(new CaptionTranslationSubmission(
+                            identity,
+                            draft,
+                            LectureSessionTracker.CurrentSessionId));
                         lastQueuedDraftId = draftSegment.Id;
                         lastQueuedDraftRevision = draftSegment.Revision;
                     }
@@ -389,11 +358,10 @@ namespace LiveCaptionsTranslator
                     string queuedText = submission.Text;
                     if (LogOnlyFlag)
                     {
-                        long? sessionId = LectureSessionTracker.CurrentSessionId;
                         await LogOnly(
                             queuedText,
                             isOverwrite: false,
-                            sessionId: sessionId,
+                            sessionId: submission.SessionId,
                             token: token,
                             identity: submission.Identity);
                     }
@@ -401,7 +369,6 @@ namespace LiveCaptionsTranslator
                     {
                         string apiName = Setting.ApiName;
                         var translateFunction = TranslateAPI.GetFunction(apiName);
-                        long? sessionId = LectureSessionTracker.CurrentSessionId;
                         string targetLanguage = Setting.TargetLanguage;
                         translationTaskQueue.Enqueue(
                             (requestToken, partialOutput) => Translate(
@@ -413,7 +380,7 @@ namespace LiveCaptionsTranslator
                                 requestToken),
                             queuedText,
                             apiName,
-                            sessionId,
+                            submission.SessionId,
                             targetLanguage,
                             submission.Identity,
                             token);
@@ -807,8 +774,7 @@ namespace LiveCaptionsTranslator
         public static async Task SuspendAndResetCaptureAsync(CancellationToken token = default)
         {
             Volatile.Write(ref captureSuspended, true);
-            captionSegmenter.Reset();
-            finalCaptionAdmissionGate.Reset();
+            captionIdentityResolver.Reset();
             translationTaskQueue.CancelPendingAndActive();
             while (pendingTextQueue.TryDequeue(out _))
             {
@@ -834,8 +800,7 @@ namespace LiveCaptionsTranslator
             // Seed the first current Windows caption snapshot after the session
             // transition, so text left on screen from the previous class is not
             // replayed into the new class.
-            captionSegmenter.Reset();
-            finalCaptionAdmissionGate.Reset();
+            captionIdentityResolver.Reset();
             Volatile.Write(ref captureSuspended, false);
         }
 

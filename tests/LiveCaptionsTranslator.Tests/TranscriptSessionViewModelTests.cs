@@ -189,6 +189,59 @@ namespace LiveCaptionsTranslator.Tests
             Assert.AreEqual(string.Empty, viewModel.DraftTranslation);
         }
 
+        [TestMethod]
+        public void LoadedHistoryRowCanBeReboundToItsLiveIdentity()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            Guid projectedId = Guid.NewGuid();
+            Guid canonicalId = Guid.NewGuid();
+            viewModel.ApplySegment(Create(
+                10,
+                projectedId,
+                source: "loaded history"));
+
+            bool rebound = viewModel.RebindSegmentIdentity(
+                projectedId,
+                Create(
+                    3,
+                    canonicalId,
+                    revision: 1,
+                    source: "canonical live row"));
+
+            Assert.IsTrue(rebound);
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.AreEqual(canonicalId, viewModel.Segments[0].Id);
+            Assert.AreEqual(3, viewModel.Segments[0].Sequence);
+            Assert.AreEqual("canonical live row", viewModel.Segments[0].SourceText);
+        }
+
+        [TestMethod]
+        public void RebindingRemovesAnInterleavedHistoryProjectionDuplicate()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            Guid projectedId = Guid.NewGuid();
+            Guid canonicalId = Guid.NewGuid();
+            viewModel.ApplySegment(Create(
+                10,
+                projectedId,
+                source: "database projection"));
+            TranscriptSegment canonical = Create(
+                3,
+                canonicalId,
+                revision: 1,
+                source: "live event");
+            viewModel.ApplySegment(canonical);
+
+            bool rebound = viewModel.RebindSegmentIdentity(
+                projectedId,
+                canonical);
+
+            Assert.IsTrue(rebound);
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.AreEqual(canonicalId, viewModel.Segments[0].Id);
+            Assert.AreEqual("live event", viewModel.Segments[0].SourceText);
+        }
+
         private static TranscriptSegment Create(
             long sequence,
             Guid? id = null,

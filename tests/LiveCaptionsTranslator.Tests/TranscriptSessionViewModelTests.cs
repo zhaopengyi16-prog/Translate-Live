@@ -242,6 +242,237 @@ namespace LiveCaptionsTranslator.Tests
             Assert.AreEqual("live event", viewModel.Segments[0].SourceText);
         }
 
+        [TestMethod]
+        public void ProvisionalCaptionUsesLiveSurfaceUntilOneCommittedRowArrives()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment draft = Create(1, source: "One task") with
+            {
+                State = SegmentState.Draft,
+                TranslatedText = null
+            };
+            viewModel.ApplySegment(draft);
+            viewModel.ApplySegment(draft with
+            {
+                Revision = 1,
+                SourceText = "One task, one resource"
+            });
+
+            Assert.HasCount(0, viewModel.Segments);
+            Assert.AreEqual("One task, one resource", viewModel.LiveText);
+
+            TranscriptSegment committed = draft with
+            {
+                Revision = 2,
+                SourceText = "One task, one resource.",
+                State = SegmentState.Committed
+            };
+            viewModel.ApplySegment(committed);
+            viewModel.ClearDraft(committed.Id, committed.Revision);
+
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.IsFalse(viewModel.HasDraft);
+            Assert.AreEqual(committed.SourceText, viewModel.LiveText);
+            Assert.IsTrue(viewModel.HasLiveCaption);
+        }
+
+        [TestMethod]
+        public void DelayedDifferentIdentityCannotReplaceTheCurrentLiveSentence()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment current = Create(2, source: "Current sentence") with
+            {
+                State = SegmentState.Draft,
+                TranslatedText = null
+            };
+            viewModel.SetDraft(current);
+            viewModel.SetDraft(Create(1, source: "Old sentence") with
+            {
+                State = SegmentState.Draft
+            });
+
+            Assert.AreEqual(current.Id, viewModel.DraftSegmentId);
+            Assert.AreEqual(current.SourceText, viewModel.LiveText);
+            Assert.IsFalse(viewModel.HasLiveTranslation);
+        }
+
+        [TestMethod]
+        public void ClearingADraftDoesNotForgetItsLiveOrderingFrontier()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment latest = Create(3, source: "Latest final.");
+            viewModel.ApplySegment(latest);
+            viewModel.SetDraft((TranscriptSegment?)null);
+            viewModel.SetDraft(Create(2, source: "Delayed old draft") with
+            {
+                State = SegmentState.Draft
+            });
+
+            Assert.AreEqual(latest.SourceText, viewModel.LiveText);
+            Assert.IsFalse(viewModel.HasDraft);
+        }
+
+        [TestMethod]
+        public void ReconnectingAcceptsANewSequenceAndRejectsEarlierEpochCallbacks()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            viewModel.SetDraft(Create(40, source: "Before reconnect") with
+            {
+                State = SegmentState.Draft,
+                SessionId = 1,
+                CaptureEpoch = 1
+            });
+            TranscriptSegment current = Create(1, source: "After reconnect") with
+            {
+                State = SegmentState.Draft,
+                SessionId = 1,
+                CaptureEpoch = 2
+            };
+            viewModel.SetDraft(current);
+            viewModel.SetDraft(Create(41, source: "Delayed provider callback") with
+            {
+                State = SegmentState.Draft,
+                SessionId = 1,
+                CaptureEpoch = 1
+            });
+
+            Assert.AreEqual(current.Id, viewModel.DraftSegmentId);
+            Assert.AreEqual(current.SourceText, viewModel.LiveText);
+        }
+
+        [TestMethod]
+        public void ClassroomResetAllowsNewScopeButRejectsOldClassroomDraft()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment old = Create(20, source: "Old classroom") with
+            {
+                State = SegmentState.Draft,
+                SessionId = 1
+            };
+            viewModel.SetDraft(old);
+            viewModel.ResetTimeline();
+            TranscriptSegment current = Create(1, source: "New classroom") with
+            {
+                State = SegmentState.Draft,
+                SessionId = 2
+            };
+            viewModel.SetDraft(current);
+            viewModel.SetDraft(old);
+
+            Assert.AreEqual(current.SourceText, viewModel.LiveText);
+            Assert.AreEqual(current.Id, viewModel.DraftSegmentId);
+        }
+
+        [TestMethod]
+        public void LoadedHistoryDoesNotBecomeLiveAudio()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            viewModel.ApplySegment(Create(500, source: "Historical sentence"), updateLive: false);
+
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.IsFalse(viewModel.HasLiveCaption);
+
+            viewModel.SetDraft(Create(1, source: "Currently spoken") with
+            {
+                State = SegmentState.Draft
+            });
+
+            Assert.AreEqual("Currently spoken", viewModel.LiveText);
+        }
+
+        [TestMethod]
+        public void NewSentenceCannotDisplayThePreviousDraftTranslation()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            viewModel.SetDraft(Create(1, source: "First sentence") with
+            {
+                State = SegmentState.Draft,
+                TranslatedText = "第一句"
+            });
+            viewModel.ApplySegment(Create(2, source: "Second sentence.") with
+            {
+                State = SegmentState.Committed,
+                TranslatedText = null
+            });
+
+            Assert.AreEqual("Second sentence.", viewModel.LiveText);
+            Assert.IsFalse(viewModel.HasLiveTranslation);
+        }
+
+        [TestMethod]
+        public void ReopenedDraftDoesNotChangeTheClassroomRowUntilReadmitted()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment final = Create(1, source: "Initial sentence.");
+            viewModel.ApplySegment(final);
+            viewModel.ApplySegment(final with
+            {
+                Revision = 1,
+                State = SegmentState.Draft,
+                SourceText = "Initial sentence continues",
+                TranslatedText = null
+            });
+
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.AreEqual(final.SourceText, viewModel.Segments[0].SourceText);
+            Assert.AreEqual("Initial sentence continues", viewModel.LiveText);
+
+            viewModel.ApplySegment(final with
+            {
+                Revision = 2,
+                SourceText = "Initial sentence continues to completion."
+            });
+
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.AreEqual(2, viewModel.Segments[0].Revision);
+        }
+
+        [TestMethod]
+        public void DelayedSameRevisionCannotDowngradeACompletedTranslation()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment translated = Create(1, source: "Completed sentence.");
+            viewModel.ApplySegment(translated);
+            viewModel.ApplySegment(translated with
+            {
+                State = SegmentState.Committed,
+                TranslatedText = null
+            });
+            viewModel.SetDraft(translated with
+            {
+                State = SegmentState.Draft,
+                TranslatedText = null
+            });
+
+            Assert.AreEqual(SegmentState.Translated, viewModel.Segments[0].State);
+            Assert.AreEqual(translated.TranslatedText, viewModel.Segments[0].TranslatedText);
+            Assert.AreEqual(translated.TranslatedText, viewModel.LiveTranslation);
+            Assert.IsFalse(viewModel.HasDraft);
+        }
+
+        [TestMethod]
+        public void FinalRevisionRejectsLateDraftTranslationBeforeTheClearCallback()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            TranscriptSegment draft = Create(1) with
+            {
+                State = SegmentState.Draft,
+                TranslatedText = null
+            };
+            viewModel.SetDraft(draft);
+            viewModel.ApplySegment(draft with
+            {
+                Revision = 1,
+                State = SegmentState.Translated,
+                TranslatedText = "最终译文"
+            });
+
+            bool applied = viewModel.SetDraftTranslation(draft.Id, 0, "旧草稿译文");
+
+            Assert.IsFalse(applied);
+            Assert.AreEqual("最终译文", viewModel.LiveTranslation);
+        }
+
         private static TranscriptSegment Create(
             long sequence,
             Guid? id = null,

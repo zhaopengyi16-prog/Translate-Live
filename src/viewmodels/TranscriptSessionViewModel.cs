@@ -19,6 +19,7 @@ namespace LiveCaptionsTranslator.viewmodels
         private string draftText = string.Empty;
         private string draftTranslation = string.Empty;
         private TranscriptSegment? draftSegment;
+        private TranscriptSegment? liveSegment;
         private TimelineFollowState followState = TimelineFollowState.FollowingLive;
         private int pendingSegmentCount;
         private string sessionStatus = "正在准备 Windows 实时字幕";
@@ -47,6 +48,7 @@ namespace LiveCaptionsTranslator.viewmodels
                 draftText = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(HasDraft));
+                RaiseLiveProperties();
             }
         }
 
@@ -61,9 +63,19 @@ namespace LiveCaptionsTranslator.viewmodels
                 draftTranslation = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(HasDraftTranslation));
+                RaiseLiveProperties();
             }
         }
         public bool HasDraftTranslation => !string.IsNullOrWhiteSpace(DraftTranslation);
+        public string LiveText => liveSegment?.SourceText ?? DraftText;
+        public string LiveTranslation => liveSegment != null
+            ? liveSegment.TranslatedText ?? string.Empty
+            : DraftTranslation;
+        public bool HasLiveCaption => !string.IsNullOrWhiteSpace(LiveText);
+        public bool HasLiveTranslation => !string.IsNullOrWhiteSpace(LiveTranslation);
+        public string LivePlaceholder => CanEndSession || IsDemoRunning
+            ? "等待讲话…"
+            : "开始课堂后，实时字幕将在这里显示";
         public TimelineFollowState FollowState => followState;
         public bool IsFollowingLive => followState == TimelineFollowState.FollowingLive;
         public bool IsBrowsingHistory => followState == TimelineFollowState.BrowsingHistory;
@@ -128,6 +140,7 @@ namespace LiveCaptionsTranslator.viewmodels
                 if (!SetField(ref isDemoRunning, value))
                     return;
                 OnPropertyChanged(nameof(DemoButtonText));
+                OnPropertyChanged(nameof(LivePlaceholder));
             }
         }
 
@@ -139,7 +152,10 @@ namespace LiveCaptionsTranslator.viewmodels
             set
             {
                 if (SetField(ref canEndSession, value))
+                {
                     OnPropertyChanged(nameof(SaveStatusText));
+                    OnPropertyChanged(nameof(LivePlaceholder));
+                }
             }
         }
 
@@ -196,8 +212,21 @@ namespace LiveCaptionsTranslator.viewmodels
 
         public bool IsEmpty => Segments.Count == 0;
 
-        public void ApplySegment(TranscriptSegment segment)
+        public void ApplySegment(TranscriptSegment segment, bool updateLive = true)
         {
+            // A provisional observation belongs to the fixed live surface. It
+            // must never allocate a classroom row merely because a caller used
+            // the general segment event rather than the draft event.
+            if (segment.State == SegmentState.Draft)
+            {
+                if (updateLive)
+                    SetDraft(segment);
+                return;
+            }
+
+            if (updateLive)
+                UpdateLiveSegment(segment);
+
             if (segmentsById.TryGetValue(segment.Id, out var existing))
             {
                 // Segment identity also owns its recognition position and first
@@ -250,19 +279,23 @@ namespace LiveCaptionsTranslator.viewmodels
         {
             if (projectedId == canonical.Id)
             {
-                ApplySegment(canonical);
+                ApplySegment(canonical, updateLive: false);
                 return true;
             }
 
             if (!segmentsById.TryGetValue(projectedId, out var projected))
             {
-                ApplySegment(canonical);
+                ApplySegment(canonical, updateLive: false);
                 return false;
             }
 
             if (segmentsById.TryGetValue(canonical.Id, out var existingCanonical))
             {
-                existingCanonical.Apply(canonical);
+                existingCanonical.Apply(canonical with
+                {
+                    Sequence = existingCanonical.Sequence,
+                    CapturedAt = existingCanonical.CapturedAt
+                });
                 Segments.Remove(projected);
                 segmentsById.Remove(projectedId);
                 OnPropertyChanged(nameof(IsEmpty));
@@ -296,7 +329,7 @@ namespace LiveCaptionsTranslator.viewmodels
                 return;
             }
 
-            if (draftSegment?.Id == draft.Id && draft.Revision < draftSegment.Revision)
+            if (!UpdateLiveSegment(draft))
                 return;
 
             bool identityChanged = draftSegment?.Id != draft.Id;
@@ -311,17 +344,27 @@ namespace LiveCaptionsTranslator.viewmodels
 
         public void SetDraft(string? text)
         {
+            liveSegment = null;
             draftSegment = null;
             DraftText = text?.Trim() ?? string.Empty;
             if (DraftText.Length == 0)
                 DraftTranslation = string.Empty;
             OnPropertyChanged(nameof(DraftSegmentId));
             OnPropertyChanged(nameof(DraftRevision));
+            RaiseLiveProperties();
         }
 
         public void SetDraftTranslation(string? text)
         {
             DraftTranslation = text?.Trim() ?? string.Empty;
+            if (liveSegment != null && draftSegment != null &&
+                liveSegment.Id == draftSegment.Id &&
+                liveSegment.Revision == draftSegment.Revision &&
+                liveSegment.State == SegmentState.Draft)
+            {
+                liveSegment = liveSegment with { TranslatedText = DraftTranslation };
+                RaiseLiveProperties();
+            }
         }
 
         public bool SetDraftTranslation(
@@ -329,10 +372,13 @@ namespace LiveCaptionsTranslator.viewmodels
             int revision,
             string? text)
         {
-            if (draftSegment?.Id != segmentId || draftSegment.Revision != revision)
+            if (draftSegment == null || liveSegment == null ||
+                draftSegment.Id != segmentId || draftSegment.Revision != revision ||
+                liveSegment.Id != segmentId || liveSegment.Revision != revision ||
+                liveSegment.State != SegmentState.Draft)
                 return false;
 
-            DraftTranslation = text?.Trim() ?? string.Empty;
+            SetDraftTranslation(text);
             return true;
         }
 
@@ -374,12 +420,57 @@ namespace LiveCaptionsTranslator.viewmodels
             DraftText = string.Empty;
             DraftTranslation = string.Empty;
             draftSegment = null;
+            liveSegment = null;
             OnPropertyChanged(nameof(DraftSegmentId));
             OnPropertyChanged(nameof(DraftRevision));
             followState = TimelineFollowState.FollowingLive;
             PendingSegmentCount = 0;
             RaiseFollowStateProperties();
             OnPropertyChanged(nameof(IsEmpty));
+            RaiseLiveProperties();
+        }
+
+        private bool UpdateLiveSegment(TranscriptSegment segment)
+        {
+            if (liveSegment != null)
+            {
+                if (segment.SessionId != liveSegment.SessionId ||
+                    segment.CaptureEpoch < liveSegment.CaptureEpoch)
+                {
+                    return false;
+                }
+
+                if (segment.CaptureEpoch == liveSegment.CaptureEpoch &&
+                    (segment.Sequence < liveSegment.Sequence ||
+                    (segment.Sequence == liveSegment.Sequence && segment.Id != liveSegment.Id) ||
+                    (segment.Id == liveSegment.Id && segment.Revision < liveSegment.Revision)))
+                {
+                    return false;
+                }
+
+                if (segment.Id == liveSegment.Id && segment.Revision == liveSegment.Revision)
+                {
+                    // A delayed provisional callback cannot reopen a committed
+                    // revision. A later, higher revision may legitimately do so.
+                    if (segment.State == SegmentState.Draft && liveSegment.State != SegmentState.Draft)
+                        return false;
+
+                    if (segment.TranslatedText == null && liveSegment.TranslatedText != null)
+                        segment = segment with { TranslatedText = liveSegment.TranslatedText };
+                }
+            }
+
+            liveSegment = segment;
+            RaiseLiveProperties();
+            return true;
+        }
+
+        private void RaiseLiveProperties()
+        {
+            OnPropertyChanged(nameof(LiveText));
+            OnPropertyChanged(nameof(LiveTranslation));
+            OnPropertyChanged(nameof(HasLiveCaption));
+            OnPropertyChanged(nameof(HasLiveTranslation));
         }
 
         private void RaiseFollowStateProperties()

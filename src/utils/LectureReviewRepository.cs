@@ -119,9 +119,10 @@ namespace LiveCaptionsTranslator.utils
             string targetLanguage,
             string apiUsed,
             DateTimeOffset? capturedAt = null,
-            CancellationToken token = default)
+            CancellationToken token = default,
+            bool allowUntranslated = false)
         {
-            ValidateTranslationText(sourceText, translatedText);
+            ValidateTranslationText(sourceText, translatedText, allowUntranslated);
             DateTimeOffset timestamp = capturedAt ?? DateTimeOffset.UtcNow;
 
             await using var connection = OpenConnection();
@@ -207,7 +208,9 @@ namespace LiveCaptionsTranslator.utils
             string apiUsed,
             CancellationToken token = default)
         {
-            ValidateTranslationText(sourceText, translatedText);
+            // Capture can save a newer source revision before its provider result.
+            // Manual create/edit still require both fields through their own APIs.
+            ValidateTranslationText(sourceText, translatedText, allowUntranslated: true);
 
             await using var connection = OpenConnection();
             await using var command = connection.CreateCommand();
@@ -276,11 +279,12 @@ namespace LiveCaptionsTranslator.utils
             return connection;
         }
 
-        private static void ValidateTranslationText(string sourceText, string translatedText)
+        private static void ValidateTranslationText(
+            string sourceText, string translatedText, bool allowUntranslated = false)
         {
             if (string.IsNullOrWhiteSpace(sourceText))
                 throw new ArgumentException("Source text cannot be empty.", nameof(sourceText));
-            if (string.IsNullOrWhiteSpace(translatedText))
+            if (!allowUntranslated && string.IsNullOrWhiteSpace(translatedText))
                 throw new ArgumentException("Translated text cannot be empty.", nameof(translatedText));
         }
     }

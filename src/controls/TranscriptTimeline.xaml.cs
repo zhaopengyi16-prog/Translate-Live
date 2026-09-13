@@ -72,18 +72,20 @@ namespace LiveCaptionsTranslator.controls
             if (viewModel != null)
             {
                 viewModel.Segments.CollectionChanged -= Segments_CollectionChanged;
-                viewModel.PropertyChanged -= ViewModel_PropertyChanged;
                 foreach (TranscriptSegmentViewModel segment in observedSegments)
                     segment.PropertyChanged -= Segment_PropertyChanged;
                 observedSegments.Clear();
             }
 
             viewModel = e.NewValue as TranscriptSessionViewModel;
+            scrollGate.Invalidate();
+            Interlocked.Increment(ref returnGeneration);
+            Interlocked.Increment(ref anchorRestoreGeneration);
+            readingAnchorId = null;
             if (viewModel == null)
                 return;
 
             viewModel.Segments.CollectionChanged += Segments_CollectionChanged;
-            viewModel.PropertyChanged += ViewModel_PropertyChanged;
             foreach (TranscriptSegmentViewModel segment in viewModel.Segments)
                 ObserveSegment(segment);
         }
@@ -121,22 +123,13 @@ namespace LiveCaptionsTranslator.controls
                 ScheduleAnchorRestore();
         }
 
-        private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
-        {
-            if (viewModel?.IsBrowsingHistory != true)
-                return;
-
-            if (e.PropertyName is nameof(TranscriptSessionViewModel.DraftText) or
-                nameof(TranscriptSessionViewModel.DraftTranslation) or
-                nameof(TranscriptSessionViewModel.HasDraft))
-            {
-                CaptureReadingAnchor();
-                ScheduleAnchorRestore();
-            }
-        }
-
         private void Segment_PropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
+            if (viewModel?.IsFollowingLive == true)
+            {
+                ScheduleFollowToLatest(newItems: null);
+                return;
+            }
             if (viewModel?.IsBrowsingHistory != true)
                 return;
 
@@ -187,9 +180,11 @@ namespace LiveCaptionsTranslator.controls
             double distanceFromBottom = Math.Max(
                 0,
                 e.ExtentHeight - e.ViewportHeight - e.VerticalOffset);
-            bool directUserScroll = e.VerticalChange < 0 ||
-                                    (Mouse.LeftButton == MouseButtonState.Pressed &&
-                                     Math.Abs(e.VerticalChange) > 0);
+            bool directUserScroll = e.ExtentHeightChange == 0 &&
+                                    e.ViewportHeightChange == 0 &&
+                                    (e.VerticalChange < 0 ||
+                                     (Mouse.LeftButton == MouseButtonState.Pressed &&
+                                      Math.Abs(e.VerticalChange) > 0));
             if (directUserScroll && distanceFromBottom > 48)
                 BeginBrowsingFromUser();
 

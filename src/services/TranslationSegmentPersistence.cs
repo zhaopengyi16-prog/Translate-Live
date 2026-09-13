@@ -57,6 +57,14 @@ namespace LiveCaptionsTranslator.services
                     if (request.Identity.Revision < state.Revision)
                         return new TranslationPersistenceResult(state.Entry, Applied: false);
 
+                    // Source-first admission may race a fast provider. It must
+                    // never replace that same version's completed translation.
+                    if (request.Identity.Revision == state.Revision &&
+                        string.IsNullOrEmpty(request.TranslatedText) &&
+                        !string.IsNullOrEmpty(state.Entry.TranslatedText) &&
+                        string.Equals(request.SourceText, state.Entry.SourceText, StringComparison.Ordinal))
+                        return new TranslationPersistenceResult(state.Entry, Applied: false);
+
                     bool sameRevisionAndPayload =
                         request.Identity.Revision == state.Revision &&
                         string.Equals(

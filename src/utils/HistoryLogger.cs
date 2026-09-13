@@ -234,7 +234,8 @@ namespace LiveCaptionsTranslator.utils
                 targetLanguage,
                 apiUsed,
                 capturedAt,
-                token);
+                token,
+                allowUntranslated: true);
         }
 
         public static async Task<TranslationHistoryEntry?> UpdateLoggedTranslationAsync(

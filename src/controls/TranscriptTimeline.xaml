@@ -32,12 +32,13 @@
     <Grid Background="{DynamicResource LectureSurfaceBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="170" />
         </Grid.RowDefinitions>
 
         <ListBox
             x:Name="TimelineList"
             AutomationProperties.AutomationId="TranscriptTimelineList"
+            AutomationProperties.Name="课堂记录"
             Grid.Row="0"
             Padding="6,0,12,8"
             Background="Transparent"
@@ -91,6 +92,12 @@
                                 Text="{Binding CapturedTime}" />
 
                             <StackPanel Grid.Column="2" Margin="0,0,24,0">
+                                <TextBlock
+                                    Margin="0,0,0,5"
+                                    FontSize="11.5"
+                                    Foreground="{DynamicResource LectureTextTertiaryBrush}"
+                                    Text="未完句"
+                                    Visibility="{Binding IsIncomplete, Converter={StaticResource BooleanToVisibilityConverter}}" />
                                 <TextBlock
                                     FontFamily="{DynamicResource LectureUiFontFamily}"
                                     FontSize="{DynamicResource LectureSourceFontSize}"
@@ -185,43 +192,57 @@
             Style="{StaticResource LecturePrimaryButtonStyle}"
             Visibility="{Binding IsReturnToLiveVisible, Converter={StaticResource BooleanToVisibilityConverter}}" />
 
+        <!-- Keep a reserved live surface so provisional revisions cannot resize
+             the classroom viewport or move a reader's history anchor. -->
         <Border
             x:Name="DraftPanel"
             Grid.Row="1"
+            AutomationProperties.AutomationId="LiveCaptionPanel"
+            AutomationProperties.Name="实时字幕"
             MaxHeight="190"
             Margin="102,8,28,4"
             Padding="0,13,0,4"
             BorderBrush="{DynamicResource LectureDividerBrush}"
-            BorderThickness="0,1,0,0"
-            Visibility="{Binding HasDraft, Converter={StaticResource BooleanToVisibilityConverter}}">
+            BorderThickness="0,1,0,0">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
                 <TextBlock
-                    Margin="0,0,16,0"
-                    VerticalAlignment="Top"
-                    FontFamily="Segoe UI"
-                    FontSize="14"
-                    Foreground="{DynamicResource LectureTextSecondaryBrush}"
-                    Text="•••" />
+                    FontSize="11.5"
+                    Foreground="{DynamicResource LectureTextTertiaryBrush}"
+                    Text="实时字幕" />
+                <TextBlock
+                    Grid.Row="1"
+                    Margin="0,8,0,0"
+                    Foreground="{DynamicResource LectureTextTertiaryBrush}"
+                    Text="{Binding LivePlaceholder}"
+                    TextWrapping="Wrap">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Visible" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasLiveCaption}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
                 <ScrollViewer
-                    Grid.Column="1"
+                    Grid.Row="1"
+                    Margin="0,4,0,0"
                     HorizontalScrollBarVisibility="Disabled"
                     PanningMode="VerticalOnly"
-                    VerticalScrollBarVisibility="Auto">
+                    VerticalScrollBarVisibility="Auto"
+                    Visibility="{Binding HasLiveCaption, Converter={StaticResource BooleanToVisibilityConverter}}">
                     <StackPanel Margin="0,0,8,0">
                         <TextBlock
-                            FontSize="11.5"
-                            Foreground="{DynamicResource LectureTextTertiaryBrush}"
-                            Text="正在聆听" />
-                        <TextBlock
-                            Margin="0,4,0,0"
                             FontFamily="{DynamicResource LectureUiFontFamily}"
                             FontSize="{DynamicResource LectureSourceFontSize}"
                             Foreground="{DynamicResource LectureTextSecondaryBrush}"
-                            Text="{Binding DraftText}"
+                            Text="{Binding LiveText}"
                             TextWrapping="Wrap" />
                         <TextBlock
                             Margin="0,5,0,0"
@@ -229,9 +250,9 @@
                             FontSize="{DynamicResource LectureSubtitleFontSize}"
                             FontWeight="SemiBold"
                             Foreground="{DynamicResource LectureTextPrimaryBrush}"
-                            Text="{Binding DraftTranslation}"
+                            Text="{Binding LiveTranslation}"
                             TextWrapping="Wrap"
-                            Visibility="{Binding HasDraftTranslation, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            Visibility="{Binding HasLiveTranslation, Converter={StaticResource BooleanToVisibilityConverter}}" />
                     </StackPanel>
                 </ScrollViewer>
             </Grid>

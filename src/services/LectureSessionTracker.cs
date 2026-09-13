@@ -26,9 +26,12 @@ namespace LiveCaptionsTranslator.services
             await sessionGate.WaitAsync(token);
             try
             {
-                long existingId = Interlocked.Exchange(ref currentSessionId, 0);
+                long existingId = Interlocked.Read(ref currentSessionId);
                 if (existingId > 0)
+                {
                     await SQLiteHistoryLogger.EndSessionAsync(existingId, null, token);
+                    Interlocked.Exchange(ref currentSessionId, 0);
+                }
 
                 var session = await SQLiteHistoryLogger.BeginSessionAsync(
                     mode, apiUsed, targetLanguage, token);
@@ -48,9 +51,12 @@ namespace LiveCaptionsTranslator.services
             await sessionGate.WaitAsync(token);
             try
             {
-                long id = Interlocked.Exchange(ref currentSessionId, 0);
+                long id = Interlocked.Read(ref currentSessionId);
                 if (id > 0)
+                {
                     await SQLiteHistoryLogger.EndSessionAsync(id, summaryText, token);
+                    Interlocked.Exchange(ref currentSessionId, 0);
+                }
             }
             finally
             {

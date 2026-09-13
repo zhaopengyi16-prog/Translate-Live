@@ -422,14 +422,25 @@ namespace LiveCaptionsTranslator.Tests
                     TranslationQueueResult result = await queue.ReadLatestResultAsync()
                         .AsTask()
                         .WaitAsync(TimeSpan.FromSeconds(2));
-                    viewModel.ApplySegment(new TranscriptSegment(
+                    var projected = new TranscriptSegment(
                         result.Identity!.SegmentId,
                         result.Identity.Sequence,
                         result.Identity.Revision,
                         result.OriginalText,
                         result.TranslatedText,
-                        SegmentState.Translated,
-                        result.Identity.CapturedAt));
+                        result.Identity.IsFinal ? SegmentState.Translated : SegmentState.Draft,
+                        result.Identity.CapturedAt);
+                    viewModel.ApplySegment(projected);
+                    await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(2));
+                    if (!result.Identity.IsFinal)
+                    {
+                        Assert.AreEqual(result.OriginalText, viewModel.LiveText);
+                        Assert.HasCount(1, viewModel.Segments,
+                            "Growing provisional revisions must not append classroom rows.");
+                        Assert.HasCount(1, await LoadRowsAsync(connectionString, session.Id),
+                            "A translated draft must not create or replace a formal stored sentence.");
+                        Assert.AreNotEqual(result.OriginalText, viewModel.Segments[0].SourceText);
+                    }
                 }
 
                 for (int index = 0; index < staleDraftReplays.Length; index++)
@@ -444,7 +455,7 @@ namespace LiveCaptionsTranslator.Tests
                 }
 
                 await WaitUntilAsync(() =>
-                    Volatile.Read(ref persistedCallbacks) == snapshots.Length);
+                    Volatile.Read(ref persistedCallbacks) == emitted.Count(segment => segment.IsFinal));
                 await queue.WaitForPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(2));
                 List<PersistedRow> rows = await LoadRowsAsync(
                     connectionString,

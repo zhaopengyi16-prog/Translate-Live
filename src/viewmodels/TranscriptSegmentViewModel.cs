@@ -19,6 +19,7 @@ namespace LiveCaptionsTranslator.viewmodels
         public DateTimeOffset CapturedAt => segment.CapturedAt;
         public TranscriptSegment Snapshot => segment;
         public SegmentState State => segment.State;
+        public bool IsIncomplete => segment.IsIncomplete;
         public string CapturedTime => segment.CapturedAt.LocalDateTime.ToString("HH:mm:ss");
         public string SequenceText => $"{segment.Sequence:00}";
 
@@ -37,7 +38,8 @@ namespace LiveCaptionsTranslator.viewmodels
         {
             SegmentState.TranslationFailed => "翻译失败，原文已安全保留。",
             SegmentState.Translated => string.Empty,
-            _ => "正在生成译文…"
+            SegmentState.Queued or SegmentState.Translating => "正在生成译文…",
+            _ => "尚无译文"
         };
 
         public TranscriptSegmentViewModel(TranscriptSegment segment)
@@ -49,6 +51,14 @@ namespace LiveCaptionsTranslator.viewmodels
         {
             if (replacement.Id != segment.Id || replacement.Revision < segment.Revision)
                 return false;
+
+            if (replacement.Revision == segment.Revision &&
+                (((segment.State is SegmentState.Translated or SegmentState.TranslationFailed) &&
+                  (replacement.State is SegmentState.Committed or SegmentState.Queued or SegmentState.Translating)) ||
+                 (segment.State == SegmentState.Translated && replacement.State == SegmentState.TranslationFailed)))
+            {
+                return false;
+            }
 
             segment = replacement;
             OnPropertyChanged(string.Empty);

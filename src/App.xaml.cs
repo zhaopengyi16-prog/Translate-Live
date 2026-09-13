@@ -315,10 +315,26 @@ namespace LiveCaptionsTranslator
 
             if (servicesStarted)
             {
+                bool cleanShutdown = true;
+                try
+                {
+                    using var flushDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    Task.Run(() => Translator.StopCaptureAndFlushAsync(flushDeadline.Token))
+                        .GetAwaiter().GetResult();
+                }
+                catch (Exception exception)
+                {
+                    cleanShutdown = false;
+                    ProductDiagnostics.Write("shutdown.caption-flush-failed", exception);
+                }
                 shutdownTokenSource.Cancel();
                 try
                 {
-                    Task.WaitAll(backgroundTasks, TimeSpan.FromSeconds(3));
+                    if (!Task.WaitAll(backgroundTasks, TimeSpan.FromSeconds(3)))
+                    {
+                        cleanShutdown = false;
+                        ProductDiagnostics.Write("shutdown.workers-timeout");
+                    }
                 }
                 catch (AggregateException exception)
                 {
@@ -326,6 +342,7 @@ namespace LiveCaptionsTranslator
                             inner => inner is not OperationCanceledException &&
                                      inner is not TaskCanceledException))
                     {
+                        cleanShutdown = false;
                         ProductDiagnostics.Write("shutdown.worker-fault", exception);
                     }
                 }
@@ -336,6 +353,7 @@ namespace LiveCaptionsTranslator
                 }
                 catch (Exception exception)
                 {
+                    cleanShutdown = false;
                     ProductDiagnostics.Write("shutdown.session-close-failed", exception);
                 }
 
@@ -357,8 +375,15 @@ namespace LiveCaptionsTranslator
                     }
                 }
 
-                RuntimeJournal.Complete();
-                ProductDiagnostics.Write("shutdown.clean");
+                if (cleanShutdown && !Translator.HasHistoryWriteFailure)
+                {
+                    RuntimeJournal.Complete();
+                    ProductDiagnostics.Write("shutdown.clean");
+                }
+                else
+                {
+                    ProductDiagnostics.Write("shutdown.recovery-retained");
+                }
             }
 
             if (ownsSingleInstanceMutex)

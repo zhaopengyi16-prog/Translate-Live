@@ -8,8 +8,13 @@ namespace LiveCaptionsTranslator.services
     /// </summary>
     internal sealed class LiveCaptionIdentityResolver
     {
-        private readonly LiveCaptionSegmenter segmenter = new();
+        private readonly LiveCaptionSegmenter segmenter;
         private readonly FinalCaptionAdmissionGate admissionGate = new();
+
+        public LiveCaptionIdentityResolver(bool splitLongDrafts = true)
+        {
+            segmenter = new LiveCaptionSegmenter(splitLongDrafts);
+        }
 
         public LiveCaptionUpdate Process(string? rawText)
         {

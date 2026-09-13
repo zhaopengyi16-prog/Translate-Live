@@ -30,6 +30,8 @@ namespace LiveCaptionsTranslator
         private Task? demoTask;
         private DateTimeOffset sessionStartedAt = DateTimeOffset.Now;
         private long legacySequence;
+        private long workspaceGeneration;
+        private long? displayedSessionId;
         private bool initialized;
         private bool settingSubscribed;
         private bool liveCaptionsConnectionSubscribed;
@@ -90,7 +92,6 @@ namespace LiveCaptionsTranslator
             try
             {
                 await LoadRecentHistoryAsync(clearTimeline: true);
-                viewModel.SetDraft(Translator.Caption?.DisplayOriginalCaption);
             }
             catch (Exception exception)
             {
@@ -163,30 +164,38 @@ namespace LiveCaptionsTranslator
             if (Translator.Setting == null || viewModel.IsSummaryRunning)
                 return;
 
+            long generation = workspaceGeneration;
+            long? requestedSessionId = displayedSessionId;
+            bool isDemo = viewModel.IsDemoRunning;
             var sessionSegments = viewModel.Segments
                 .Select(segment => segment.Snapshot)
-                .Where(segment => segment.CapturedAt >= sessionStartedAt)
                 .ToList();
-            if (sessionSegments.Count == 0)
-            {
-                sessionSegments = viewModel.Segments
-                    .Select(segment => segment.Snapshot)
-                    .ToList();
-            }
+            int eligibleCount = sessionSegments.Count(segment =>
+                !string.IsNullOrWhiteSpace(segment.SourceText));
+            int includedCount = Math.Min(eligibleCount, LectureSummaryService.MaximumTranscriptSegments);
+            string summaryScope = eligibleCount > includedCount
+                ? $"最近 {includedCount} 条字幕（本次课堂共 {eligibleCount} 条）"
+                : $"{includedCount} 条字幕";
 
             viewModel.IsSummaryRunning = true;
-            viewModel.SummaryStatus = $"正在使用 {Translator.Setting.SummaryEngineDisplayName} 整理课堂内容…";
+            viewModel.SummaryStatus = $"正在使用 {Translator.Setting.SummaryEngineDisplayName} 整理{summaryScope}…";
             try
             {
-                viewModel.SummaryText = await summaryService.GenerateAsync(
+                string summary = await summaryService.GenerateAsync(
                     Translator.Setting.Summary, sessionSegments);
-                await LectureSessionTracker.SaveSummaryAsync(viewModel.SummaryText);
-                viewModel.SummaryStatus = $"总结完成 · 基于 {sessionSegments.Count} 条字幕";
+                if (requestedSessionId.HasValue && !isDemo)
+                    await SQLiteHistoryLogger.SaveSessionSummaryAsync(requestedSessionId.Value, summary);
+                if (generation == workspaceGeneration && requestedSessionId == displayedSessionId)
+                {
+                    viewModel.SummaryText = summary;
+                    viewModel.SummaryStatus = $"总结完成 · 基于{summaryScope}";
+                }
             }
             catch (Exception exception)
             {
                 ProductDiagnostics.Write("workspace.summary-failed", exception);
-                viewModel.SummaryStatus = exception.Message;
+                if (generation == workspaceGeneration && requestedSessionId == displayedSessionId)
+                    viewModel.SummaryStatus = "课堂总结生成失败，请检查模型配置或网络后重试";
             }
             finally
             {
@@ -276,17 +285,18 @@ namespace LiveCaptionsTranslator
 
         private void OnTranscriptDraftChanged(TranscriptSegment? draft)
         {
-            if (viewModel.IsDemoRunning)
+            // Null carries no sentence identity. A delayed clear must not erase
+            // a newer observation; committed events clear the matching draft.
+            if (viewModel.IsDemoRunning || draft == null)
                 return;
+
+            long epoch = draft.CaptureEpoch;
+            long? sessionId = draft.SessionId;
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (draft == null)
-                {
-                    viewModel.SetDraft((TranscriptSegment?)null);
+                if (!CanApplyLiveEvent(sessionId, epoch))
                     return;
-                }
-
                 viewModel.SetDraft(draft);
                 if (!string.IsNullOrWhiteSpace(draft.TranslatedText))
                 {
@@ -310,8 +320,11 @@ namespace LiveCaptionsTranslator
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (!CanApplyLiveEvent(segment.SessionId, segment.CaptureEpoch))
+                    return;
                 viewModel.ApplySegment(segment);
-                viewModel.ClearDraft(segment.Id, segment.Revision);
+                if (segment.State != SegmentState.Draft)
+                    viewModel.ClearDraft(segment.Id, segment.Revision);
                 viewModel.SessionStatus = segment.State == SegmentState.TranslationFailed
                     ? "部分句子翻译失败；原文已保留"
                     : "正在实时翻译";
@@ -334,16 +347,33 @@ namespace LiveCaptionsTranslator
                 }
             }
 
-            Dispatcher.BeginInvoke(new Action(() => AddHistoryEntry(
-                change.Entry,
-                change.ReplacedEntryId,
-                change.SegmentId,
-                change.Sequence,
-                change.Revision)));
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (viewModel.IsDemoRunning)
+                    return;
+                AddHistoryEntry(
+                    change.Entry,
+                    change.ReplacedEntryId,
+                    change.SegmentId,
+                    change.Sequence,
+                    change.Revision,
+                    change.CaptureEpoch,
+                    change.IsIncomplete);
+            }));
         }
+
+        private bool CanApplyLiveEvent(long? sessionId, long epoch) =>
+            !viewModel.IsDemoRunning &&
+            sessionId.HasValue &&
+            sessionId == displayedSessionId &&
+            sessionId == LectureSessionTracker.CurrentSessionId &&
+            epoch == Translator.CaptureEpoch;
 
         private async Task LoadRecentHistoryAsync(bool clearTimeline)
         {
+            long generation = ++workspaceGeneration;
+            long? sessionId = LectureSessionTracker.CurrentSessionId;
+            displayedSessionId = sessionId;
             lock (historyProjectionLock)
             {
                 historyProjectionInitializing = true;
@@ -353,10 +383,6 @@ namespace LiveCaptionsTranslator
             bool completed = false;
             try
             {
-                long? sessionId = LectureSessionTracker.CurrentSessionId;
-                var history = sessionId.HasValue
-                    ? await SQLiteHistoryLogger.LoadSessionHistoryAsync(sessionId.Value)
-                    : [];
                 if (clearTimeline)
                 {
                     viewModel.ResetTimeline();
@@ -364,6 +390,12 @@ namespace LiveCaptionsTranslator
                     loadedSegmentIds.Clear();
                     legacySequence = 0;
                 }
+
+                var history = sessionId.HasValue
+                    ? await SQLiteHistoryLogger.LoadSessionHistoryAsync(sessionId.Value)
+                    : [];
+                if (generation != workspaceGeneration || displayedSessionId != sessionId)
+                    return;
 
                 foreach (var entry in history.AsEnumerable().Reverse())
                     AddHistoryEntry(entry);
@@ -391,14 +423,16 @@ namespace LiveCaptionsTranslator
                             change.ReplacedEntryId,
                             change.SegmentId,
                             change.Sequence,
-                            change.Revision);
+                            change.Revision,
+                            change.CaptureEpoch,
+                            change.IsIncomplete);
                 }
 
                 completed = true;
             }
             finally
             {
-                if (!completed)
+                if (!completed && generation == workspaceGeneration)
                 {
                     lock (historyProjectionLock)
                         historyProjectionInitializing = false;
@@ -414,8 +448,12 @@ namespace LiveCaptionsTranslator
             long? replacedEntryId = null,
             Guid? stableSegmentId = null,
             long? stableSequence = null,
-            int revision = 0)
+            int revision = 0,
+            long captureEpoch = 0,
+            bool isIncomplete = false)
         {
+            if (!displayedSessionId.HasValue || entry.SessionId != displayedSessionId)
+                return;
             if (entry.Id > 0 && loadedEntryIds.Contains(entry.Id) && !stableSegmentId.HasValue)
                 return;
 
@@ -425,13 +463,13 @@ namespace LiveCaptionsTranslator
 
             SegmentState state;
             string? translatedText;
-            if (string.Equals(entry.TranslatedText, "N/A", StringComparison.Ordinal))
+            if (string.IsNullOrWhiteSpace(entry.TranslatedText) ||
+                string.Equals(entry.TranslatedText, "N/A", StringComparison.Ordinal))
             {
                 state = SegmentState.Committed;
                 translatedText = null;
             }
-            else if (string.IsNullOrWhiteSpace(entry.TranslatedText) ||
-                     entry.TranslatedText.Contains("[ERROR]", StringComparison.OrdinalIgnoreCase))
+            else if (entry.TranslatedText.Contains("[ERROR]", StringComparison.OrdinalIgnoreCase))
             {
                 state = SegmentState.TranslationFailed;
                 translatedText = null;
@@ -456,7 +494,10 @@ namespace LiveCaptionsTranslator
                 entry.SourceText,
                 translatedText,
                 state,
-                capturedAt);
+                capturedAt,
+                SessionId: entry.SessionId,
+                CaptureEpoch: captureEpoch,
+                IsIncomplete: isIncomplete);
 
             bool replaced = false;
             if (replacedEntryId is > 0)
@@ -482,12 +523,14 @@ namespace LiveCaptionsTranslator
                 loadedSegmentIds[entry.Id] = segment.Id;
             }
             if (!replaced && !rebound)
-                viewModel.ApplySegment(segment);
+                viewModel.ApplySegment(segment, updateLive: false);
             if (stableSegmentId.HasValue)
                 viewModel.ClearDraft(stableSegmentId.Value, revision);
-            viewModel.SessionStatus = state == SegmentState.TranslationFailed
-                ? "部分句子翻译失败；原文已保留"
-                : "正在实时翻译";
+            viewModel.SessionStatus = viewModel.CanEndSession
+                ? state == SegmentState.TranslationFailed
+                    ? "部分句子翻译失败；原文已保留"
+                    : "正在实时翻译"
+                : "本次课堂已保存，可查看记录或开始新课堂";
         }
 
         private Guid ResolveHistorySegmentId(long entryId)
@@ -507,6 +550,12 @@ namespace LiveCaptionsTranslator
                 return;
             }
 
+            if (LectureSessionTracker.CurrentSessionId.HasValue)
+            {
+                viewModel.SessionStatus = "请先结束当前课堂，再播放界面演示";
+                return;
+            }
+
             demoTask = RunDemoAsync();
             await demoTask;
         }
@@ -515,12 +564,22 @@ namespace LiveCaptionsTranslator
         {
             demoCancellation?.Dispose();
             demoCancellation = new CancellationTokenSource();
+            long generation = ++workspaceGeneration;
             var coordinator = new TranscriptCoordinator(new DemoTranslationService());
             coordinator.DraftChanged += draft => Dispatcher.BeginInvoke(
-                new Action(() => viewModel.SetDraft(draft)));
+                new Action(() =>
+                {
+                    if (viewModel.IsDemoRunning && generation == workspaceGeneration)
+                        viewModel.SetDraft(draft);
+                }));
             coordinator.SegmentChanged += segment => Dispatcher.BeginInvoke(
-                new Action(() => viewModel.ApplySegment(segment)));
+                new Action(() =>
+                {
+                    if (viewModel.IsDemoRunning && generation == workspaceGeneration)
+                        viewModel.ApplySegment(segment);
+                }));
 
+            displayedSessionId = null;
             viewModel.ResetTimeline();
             viewModel.IsDemoRunning = true;
             viewModel.CaptureMode = "离线界面演示";
@@ -573,6 +632,7 @@ namespace LiveCaptionsTranslator
         private async Task EnterOnlineCourseAsync()
         {
             await StopDemoAsync();
+            await Translator.StopCaptureAndFlushAsync();
             await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText);
             viewModel.CanEndSession = false;
             var liveCaptionsWindow = Translator.Window;
@@ -623,6 +683,7 @@ namespace LiveCaptionsTranslator
         private async Task EnterClassroomModeAsync()
         {
             await StopDemoAsync();
+            await Translator.StopCaptureAndFlushAsync();
             await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText);
             viewModel.CanEndSession = false;
             if (Translator.Window == null)
@@ -694,6 +755,7 @@ namespace LiveCaptionsTranslator
                 viewModel.MicrophoneStatus = "本次麦克风已停止";
             }
 
+            await Translator.StopCaptureAndFlushAsync();
             await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText);
             viewModel.CanEndSession = false;
             viewModel.LiveCaptionsStatus = Translator.Window == null

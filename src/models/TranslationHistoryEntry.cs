@@ -24,7 +24,9 @@ namespace LiveCaptionsTranslator.models
         Guid? SegmentId = null,
         long? Sequence = null,
         int Revision = 0,
-        bool IsFinal = true);
+        bool IsFinal = true,
+        long CaptureEpoch = 0,
+        bool IsIncomplete = false);
 
     public sealed class LectureSessionEntry
     {

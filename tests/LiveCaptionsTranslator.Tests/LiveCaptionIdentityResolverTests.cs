@@ -10,6 +10,226 @@ namespace LiveCaptionsTranslator.Tests
         private const string C = "Charlie sentence is complete.";
 
         [TestMethod]
+        public void StableCompletedPrefixAnchorsItsRadicallyCorrectedDraft()
+        {
+            var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+            var first = resolver.Process(A + " the valve is", Start());
+            var correction = resolver.Process(A + " an unstable reading appears",
+                Start().AddMilliseconds(200));
+            var final = resolver.Process(A + " An unstable reading appears.",
+                Start().AddMilliseconds(400));
+
+            Assert.AreEqual(first.DraftSegment!.Id, correction.DraftSegment?.Id);
+            Assert.AreEqual(first.DraftSegment.Id, final.FinalizedSegments.Single().Id);
+            Assert.AreEqual(2, final.CurrentSegment!.Sequence);
+        }
+
+        [TestMethod]
+        public void CompletingTheDraftAndAppendingAnotherSentenceKeepsBothOccurrences()
+        {
+            var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+            var first = resolver.Process(A + " the valve is open", Start());
+            var next = resolver.Process(A + " The valve is open. An unstable reading appears.",
+                Start().AddMilliseconds(200));
+
+            Assert.HasCount(2, next.FinalizedSegments);
+            Assert.AreEqual(first.DraftSegment!.Id, next.FinalizedSegments[0].Id);
+            Assert.AreNotEqual(next.FinalizedSegments[0].Id, next.FinalizedSegments[1].Id);
+        }
+
+        [TestMethod]
+        public void RadicalSingleDraftCorrectionRetainsOneIdentityUntilPunctuation()
+        {
+            var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+            LiveCaptionSegment first = resolver.Process("the valve is", Start()).DraftSegment!;
+            LiveCaptionUpdate corrected = resolver.Process(
+                "an unstable reading appears", Start().AddMilliseconds(200));
+            LiveCaptionUpdate final = resolver.Process(
+                "An unstable reading appears.", Start().AddMilliseconds(400));
+
+            Assert.IsEmpty(corrected.FinalizedSegments);
+            Assert.AreEqual(first.Id, corrected.DraftSegment?.Id);
+            Assert.AreEqual(first.Id, final.FinalizedSegments.Single().Id);
+            Assert.AreEqual(first.CapturedAt, final.FinalizedSegments.Single().CapturedAt);
+            Assert.AreEqual("An unstable reading appears.", final.CurrentText);
+        }
+
+        [TestMethod]
+        public void RadicalSingleDraftCanBeCorrectedDirectlyIntoItsFinal()
+        {
+            var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+            LiveCaptionSegment first = resolver.Process("the valve is", Start()).DraftSegment!;
+            LiveCaptionSegment corrected = resolver.Process(
+                "An unstable reading appears.", Start().AddMilliseconds(200))
+                .FinalizedSegments.Single();
+
+            Assert.AreEqual(first.Id, corrected.Id);
+            Assert.IsTrue(corrected.Revision > first.Revision);
+        }
+
+        [TestMethod]
+        public void HistoricalFinalCannotMasqueradeAsARadicalDraftCorrection()
+        {
+            var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+            resolver.Process(A, Start());
+            LiveCaptionSegment draft = resolver.Process(
+                "the valve is", Start().AddMilliseconds(100)).DraftSegment!;
+
+            LiveCaptionUpdate replay = resolver.Process(A, Start().AddMilliseconds(200));
+
+            Assert.IsEmpty(replay.FinalizedSegments);
+            Assert.AreEqual(draft.Id, replay.DraftSegment?.Id);
+            Assert.AreEqual(draft.Text, replay.CurrentText);
+        }
+
+        [TestMethod]
+        public void StandaloneClippedHeadKeepsTheFullRecognizedSentence()
+        {
+            var resolver = new LiveCaptionIdentityResolver();
+            const string full =
+                "For the next experiment, the cooling circuit maintains a stable operating temperature.";
+            const string clipped =
+                "the cooling circuit maintains a stable operating temperature.";
+            LiveCaptionSegment original = resolver.Process(full, Start())
+                .FinalizedSegments.Single();
+
+            LiveCaptionUpdate update = resolver.Process(
+                clipped, Start().AddMilliseconds(200));
+
+            Assert.IsEmpty(update.FinalizedSegments);
+            Assert.AreEqual(original.Id, update.CurrentSegment?.Id);
+            Assert.AreEqual(full, update.CurrentText);
+            Assert.AreEqual(clipped, update.NormalizedText);
+        }
+
+        [TestMethod]
+        public void ShiftedClippedHeadRetainsItsIdentityAndTheKnownSuffix()
+        {
+            var resolver = new LiveCaptionIdentityResolver();
+            const string full =
+                "During the trial, the cooling circuit maintains a stable operating temperature.";
+            const string clipped =
+                "the cooling circuit maintains a stable operating temperature.";
+            LiveCaptionUpdate initial = resolver.Process($"{A} {full} {C}", Start());
+
+            LiveCaptionUpdate update = resolver.Process(
+                $"{clipped} {C}", Start().AddMilliseconds(200));
+
+            Assert.IsEmpty(update.FinalizedSegments);
+            CollectionAssert.AreEqual(
+                initial.WindowSegmentIds.Skip(1).ToArray(),
+                update.WindowSegmentIds.ToArray());
+        }
+
+        [TestMethod]
+        public void ClippedCjkWindowPreservesTheOpeningWithoutAddingSpaces()
+        {
+            var resolver = new LiveCaptionIdentityResolver();
+            const string full = "开始实验后，冷却回路保持稳定的工作温度。";
+            LiveCaptionSegment first = resolver.Process(full, Start())
+                .FinalizedSegments.Single();
+
+            LiveCaptionUpdate clipped = resolver.Process(
+                "冷却回路保持稳定的工作温度。", Start().AddMilliseconds(200));
+
+            Assert.IsEmpty(clipped.FinalizedSegments);
+            Assert.AreEqual(first.Id, clipped.CurrentSegment?.Id);
+            Assert.AreEqual(full, clipped.CurrentText);
+        }
+
+        [TestMethod]
+        public void ClippedFinalCanContinueWithoutDuplicatingOrLosingItsOpening()
+        {
+            var resolver = new LiveCaptionIdentityResolver();
+            const string opening = "During the trial, ";
+            const string body = "the cooling circuit maintains a stable operating temperature";
+            LiveCaptionSegment first = resolver.Process(opening + body + ".", Start())
+                .FinalizedSegments.Single();
+
+            LiveCaptionUpdate growing = resolver.Process(
+                body + " while the controller adjusts", Start().AddMilliseconds(200));
+            LiveCaptionUpdate final = resolver.Process(
+                body + " while the controller adjusts the inlet valve.",
+                Start().AddMilliseconds(400));
+            LiveCaptionSegment completed = final.FinalizedSegments.Single();
+
+            Assert.AreEqual(first.Id, growing.DraftSegment?.Id);
+            Assert.AreEqual(first.Id, completed.Id);
+            Assert.AreEqual(first.CapturedAt, completed.CapturedAt);
+            Assert.IsTrue(completed.Revision > growing.DraftSegment!.Revision);
+            Assert.AreEqual(
+                opening + body + " while the controller adjusts the inlet valve.",
+                completed.Text);
+
+            LiveCaptionUpdate replay = resolver.Process(
+                body + ".", Start().AddMilliseconds(600));
+            Assert.IsEmpty(replay.FinalizedSegments);
+            Assert.AreEqual(completed.Text, replay.CurrentText);
+        }
+
+        [TestMethod]
+        public void ANewDraftTrajectoryPreservesAGenuinelyRepeatedSuffix()
+        {
+            var resolver = new LiveCaptionIdentityResolver();
+            const string body = "the cooling circuit maintains a stable operating temperature";
+            LiveCaptionSegment first = resolver.Process(
+                "During the trial, " + body + ".", Start()).FinalizedSegments.Single();
+            LiveCaptionSegment nextDraft = resolver.Process(
+                "the cooling", Start().AddMilliseconds(200)).DraftSegment!;
+            resolver.Process(body, Start().AddMilliseconds(400));
+            LiveCaptionSegment repeated = resolver.Process(
+                body + ".", Start().AddMilliseconds(600)).FinalizedSegments.Single();
+
+            Assert.AreNotEqual(first.Id, repeated.Id);
+            Assert.AreEqual(nextDraft.Id, repeated.Id);
+            Assert.AreEqual(body + ".", repeated.Text);
+        }
+
+        [TestMethod]
+        public void ReplayedClippedIntermediateDraftCannotRegressTheLiveContinuation()
+        {
+            var resolver = new LiveCaptionIdentityResolver();
+            const string opening = "During the trial, ";
+            const string body = "the cooling circuit maintains a stable operating temperature";
+            resolver.Process(opening + body + ".", Start());
+            resolver.Process(body + " while the controller adjusts", Start().AddMilliseconds(100));
+            LiveCaptionSegment newest = resolver.Process(
+                body + " while the controller adjusts the inlet valve",
+                Start().AddMilliseconds(200)).DraftSegment!;
+
+            LiveCaptionUpdate replay = resolver.Process(
+                body + " while the controller adjusts", Start().AddMilliseconds(300));
+
+            Assert.IsEmpty(replay.FinalizedSegments);
+            Assert.AreEqual(newest.Id, replay.DraftSegment?.Id);
+            Assert.AreEqual(newest.Revision, replay.DraftSegment?.Revision);
+            Assert.AreEqual(newest.Text, replay.CurrentText);
+        }
+
+        [TestMethod]
+        public void CompleteSentenceModeKeepsLongClippedSpeechInOneIdentity()
+        {
+            var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+            const string opening = "Before beginning the controlled experiment, ";
+            const string body =
+                "the technician checks the cooling circuit and records the inlet pressure while " +
+                "the controller maintains a steady flow through the primary channel and the " +
+                "secondary sensor verifies the expected temperature";
+            LiveCaptionSegment first = resolver.Process(opening + body, Start()).DraftSegment!;
+            LiveCaptionUpdate clipped = resolver.Process(
+                body + " throughout the test", Start().AddMilliseconds(200));
+            LiveCaptionUpdate final = resolver.Process(
+                body + " throughout the test.", Start().AddMilliseconds(400));
+
+            Assert.IsEmpty(clipped.FinalizedSegments);
+            Assert.AreEqual(first.Id, clipped.DraftSegment?.Id);
+            Assert.HasCount(1, final.FinalizedSegments);
+            Assert.AreEqual(first.Id, final.FinalizedSegments[0].Id);
+            Assert.AreEqual(opening + body + " throughout the test.",
+                final.FinalizedSegments[0].Text);
+        }
+
+        [TestMethod]
         public void RotatedCompletedWindowDoesNotCreateANewIdentity()
         {
             var resolver = new LiveCaptionIdentityResolver();

@@ -96,6 +96,8 @@ namespace LiveCaptionsTranslator.services
             public DateTimeOffset LastForwardObservedAt { get; private set; }
             public DateTimeOffset LastSeenAt { get; private set; }
 
+            public IEnumerable<string> EarlierTexts => previousTexts;
+
             public bool IsCurrentText(string text)
             {
                 return string.Equals(
@@ -253,6 +255,12 @@ namespace LiveCaptionsTranslator.services
         private bool activeDraftEligible;
         private DateTimeOffset activeDraftChangedAt;
         private long nextSequence;
+        private readonly bool splitLongDrafts;
+
+        public LiveCaptionSegmenter(bool splitLongDrafts = true)
+        {
+            this.splitLongDrafts = splitLongDrafts;
+        }
 
         internal int RecentLedgerCount
         {
@@ -277,7 +285,12 @@ namespace LiveCaptionsTranslator.services
                 if (normalized.Length == 0)
                     return BuildUpdate(normalized, [], observedAt);
 
-                var (completed, observedDraft) = SplitSentences(normalized);
+                // UI Automation can clip the beginning of its first visible
+                // sentence. Repair that physical window edge before splitting;
+                // otherwise the same speech can acquire different reading-unit
+                // boundaries and new identities on every shifted snapshot.
+                string reconciledWindow = RestoreClippedWindowHead(normalized);
+                var (completed, observedDraft) = SplitSentences(reconciledWindow);
                 if (suppressNextSnapshot)
                 {
                     suppressNextSnapshot = false;
@@ -301,6 +314,10 @@ namespace LiveCaptionsTranslator.services
                 var currentCompleted = new List<LiveCaptionSegment>(completed.Count);
                 var finalized = new List<LiveCaptionSegment>();
                 int draftCompletionIndex = FindDraftCompletionIndex(completed);
+                bool positionOnlyCompletion = draftCompletionIndex < 0 &&
+                    IsPositionSupportedDraftCompletion(completed, observedDraft);
+                if (positionOnlyCompletion)
+                    draftCompletionIndex = completed.Count - 1;
                 int alignmentLimit = draftCompletionIndex < 0
                     ? completed.Count
                     : draftCompletionIndex;
@@ -424,10 +441,11 @@ namespace LiveCaptionsTranslator.services
                     string candidate = completed[index];
                     LiveCaptionSegment segment;
                     if (activeDraft != null &&
-                        TryReconcileDraftCompletion(
+                        (TryReconcileDraftCompletion(
                             activeDraft.Text,
                             candidate,
-                            out string reconciled))
+                            out string reconciled) ||
+                         positionOnlyCompletion && index == draftCompletionIndex))
                     {
                         segment = activeDraft with
                         {
@@ -481,7 +499,12 @@ namespace LiveCaptionsTranslator.services
                         !frontierIsVisible,
                     hasCompletedSentences:
                         finalized.Count > 0 ||
-                        (activeDraft == null && currentCompleted.Count > 0));
+                        (activeDraft == null && currentCompleted.Count > 0),
+                    canReviseDraftAtSamePosition:
+                        finalized.Count == 0 &&
+                        completed.Count == previousCompleted.Count &&
+                        currentCompleted.Select(segment => segment.Id).SequenceEqual(
+                            previousCompleted.Select(segment => segment.Id)));
                 previousCompleted = currentCompleted;
                 previousSnapshot = normalized;
                 return BuildUpdate(normalized, finalized, observedAt);
@@ -538,6 +561,37 @@ namespace LiveCaptionsTranslator.services
                 }
             }
             return -1;
+        }
+
+        private bool IsPositionSupportedDraftCompletion(
+            IReadOnlyList<string> completed,
+            string observedDraft)
+        {
+            if (activeDraft == null || observedDraft.Length != 0 ||
+                completed.Count != previousCompleted.Count + 1 ||
+                IsKnownHistoricalText(completed[^1]))
+            {
+                return false;
+            }
+
+            // The completed prefix must retain the same occurrences before the
+            // old draft's right-edge slot. A shifted/reordered prefix or an
+            // additional completed position is not a radical draft correction.
+            for (int index = 0; index < previousCompleted.Count; index++)
+            {
+                LiveCaptionSegment previous = previousCompleted[index];
+                RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                    candidate => candidate.Segment.Id == previous.Id);
+                bool matches = entry != null
+                    ? entry.IsCurrentText(completed[index]) ||
+                      entry.IsHistoricalRevision(completed[index])
+                    : string.Equals(NormalizeIdentityText(previous.Text),
+                        NormalizeIdentityText(completed[index]),
+                        StringComparison.OrdinalIgnoreCase);
+                if (!matches)
+                    return false;
+            }
+            return true;
         }
 
         internal int RecentSnapshotCount
@@ -1256,7 +1310,8 @@ namespace LiveCaptionsTranslator.services
             string observedDraft,
             DateTimeOffset observedAt,
             bool canContinueFinal,
-            bool hasCompletedSentences)
+            bool hasCompletedSentences,
+            bool canReviseDraftAtSamePosition)
         {
             if (observedDraft.Length == 0)
             {
@@ -1323,6 +1378,23 @@ namespace LiveCaptionsTranslator.services
                 return;
             }
 
+            RecentSegmentEntry? continuedEntry = recentSegments.FirstOrDefault(
+                entry => entry.Segment.Id == activeDraft.Id);
+            if (continuedEntry != null &&
+                !string.Equals(
+                    NormalizeIdentityText(activeDraft.Text),
+                    NormalizeIdentityText(observedDraft),
+                    StringComparison.OrdinalIgnoreCase) &&
+                (continuedEntry.IsCurrentText(observedDraft) ||
+                 continuedEntry.IsHistoricalRevision(observedDraft)))
+            {
+                // A reopened final can receive an older clipped draft while
+                // its newer continuation is still live. Replaying a known
+                // revision is not another forward recognizer correction.
+                continuedEntry.MarkSeen(observedAt);
+                return;
+            }
+
             if (CaptionRevisionPolicy.TryReconcile(
                     activeDraft.Text,
                     observedDraft,
@@ -1342,9 +1414,34 @@ namespace LiveCaptionsTranslator.services
                 return;
             }
 
-            activeDraft = CreateSegment(observedDraft, isFinal: false, observedAt);
+            if (canReviseDraftAtSamePosition)
+            {
+                // A single live hypothesis may be substantially rewritten before
+                // the recognizer establishes any sentence boundary. A failed
+                // similarity score is not evidence of a second utterance. Known
+                // historical text is a replay ambiguity and cannot overwrite it.
+                if (IsKnownHistoricalText(observedDraft))
+                    return;
+
+                activeDraft = activeDraft with
+                {
+                    Revision = activeDraft.Revision + 1,
+                    Text = observedDraft
+                };
+                RememberContinuedDraftRevision(activeDraft, observedAt);
+            }
+            else
+            {
+                activeDraft = CreateSegment(observedDraft, isFinal: false, observedAt);
+            }
             activeDraftChangedAt = observedAt;
             activeDraftEligible = true;
+        }
+
+        private bool IsKnownHistoricalText(string text)
+        {
+            return recentSegments.Any(entry =>
+                entry.IsCurrentText(text) || entry.IsHistoricalRevision(text));
         }
 
         private bool IsHistoricalTailDraftRollback(
@@ -1516,7 +1613,164 @@ namespace LiveCaptionsTranslator.services
                 observedAt);
         }
 
-        private static (List<string> Completed, string Draft) SplitSentences(string text)
+        private readonly record struct CaptionWord(int Start, int Length);
+
+        private string RestoreClippedWindowHead(string observed)
+        {
+            if (previousCompleted.Count == 0 && activeDraft == null)
+                return observed;
+
+            // A newly observed short draft growing into an old sentence's
+            // suffix is evidence of a second utterance, not head clipping.
+            // Preserve that already established trajectory before considering
+            // historical completed text.
+            if (activeDraft != null)
+            {
+                string draftPrefix = NormalizeLexicalText(activeDraft.Text);
+                string observedPrefix = NormalizeLexicalText(observed);
+                int minimum = draftPrefix.Any(TextUtil.isCJChar) ? 1 : 3;
+                if (draftPrefix.Length >= minimum &&
+                    observedPrefix.StartsWith(
+                        draftPrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return observed;
+                }
+            }
+
+            List<CaptionWord> currentWords = ReadCaptionWords(observed);
+            if (currentWords.Count == 0)
+                return observed;
+
+            string? missingPrefix = null;
+            int bestOverlapCharacters = 0;
+            foreach (string previous in GetVisibleOccurrenceTexts())
+            {
+                List<CaptionWord> previousWords = ReadCaptionWords(previous);
+                if (previousWords.Count == 0)
+                    continue;
+
+                // An intact leading occurrence must never be reconstructed
+                // from a matching suffix of some other visible occurrence.
+                if (WordsMatchAtHead(previous, previousWords, 0, observed, currentWords))
+                    return observed;
+
+                for (int start = 1; start < previousWords.Count; start++)
+                {
+                    int count = previousWords.Count - start;
+                    if (count > currentWords.Count ||
+                        !WordsMatchAtHead(previous, previousWords, start, observed, currentWords))
+                    {
+                        continue;
+                    }
+
+                    CaptionWord last = currentWords[count - 1];
+                    int overlapCharacters = last.Start + last.Length;
+                    int cjkCount = observed.AsSpan(0, overlapCharacters)
+                        .ToString().Count(TextUtil.isCJChar);
+                    bool sufficientEvidence = cjkCount > 0
+                        ? cjkCount >= LiveCaptionSegmentationThresholds.ShortTailMinimumCjkCharacters
+                        : count >= LiveCaptionSegmentationThresholds.ShortTailMinimumLatinWords &&
+                          overlapCharacters >= 12;
+                    if (!sufficientEvidence || overlapCharacters <= bestOverlapCharacters)
+                        continue;
+
+                    missingPrefix = previous[..previousWords[start].Start];
+                    bestOverlapCharacters = overlapCharacters;
+                }
+            }
+
+            // Only restore a prefix belonging to one retained occurrence. Do
+            // not concatenate old complete windows: that would grow forever
+            // and could replay older classroom records as new speech.
+            return missingPrefix == null ? observed : missingPrefix + observed;
+        }
+
+        private IEnumerable<string> GetVisibleOccurrenceTexts()
+        {
+            if (activeDraft != null)
+                yield return activeDraft.Text;
+
+            foreach (LiveCaptionSegment segment in previousCompleted)
+            {
+                yield return segment.Text;
+                RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                    candidate => candidate.Segment.Id == segment.Id);
+                if (entry == null)
+                    continue;
+
+                foreach (string earlier in entry.EarlierTexts)
+                    yield return earlier;
+            }
+
+            // When a final is reopened as a draft it temporarily leaves the
+            // completed window. Its prior clipped revisions still need the
+            // same reconstruction anchors for late window replays.
+            if (activeDraft != null)
+            {
+                RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                    candidate => candidate.Segment.Id == activeDraft.Id);
+                if (entry != null)
+                {
+                    yield return entry.Segment.Text;
+                    foreach (string earlier in entry.EarlierTexts)
+                        yield return earlier;
+                }
+            }
+        }
+
+        private static bool WordsMatchAtHead(
+            string previous,
+            IReadOnlyList<CaptionWord> previousWords,
+            int start,
+            string current,
+            IReadOnlyList<CaptionWord> currentWords)
+        {
+            int count = previousWords.Count - start;
+            if (count > currentWords.Count)
+                return false;
+
+            for (int index = 0; index < count; index++)
+            {
+                CaptionWord left = previousWords[start + index];
+                CaptionWord right = currentWords[index];
+                if (!previous.AsSpan(left.Start, left.Length).Equals(
+                        current.AsSpan(right.Start, right.Length),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static List<CaptionWord> ReadCaptionWords(string text)
+        {
+            var words = new List<CaptionWord>();
+            for (int index = 0; index < text.Length;)
+            {
+                if (!char.IsLetterOrDigit(text[index]))
+                {
+                    index++;
+                    continue;
+                }
+
+                int start = index++;
+                if (!TextUtil.isCJChar(text[start]))
+                {
+                    while (index < text.Length &&
+                           char.IsLetterOrDigit(text[index]) &&
+                           !TextUtil.isCJChar(text[index]))
+                    {
+                        index++;
+                    }
+                }
+                words.Add(new CaptionWord(start, index - start));
+            }
+            return words;
+        }
+
+        private (List<string> Completed, string Draft) SplitSentences(string text)
         {
             var completed = new List<string>();
             int sentenceStart = 0;
@@ -1549,7 +1803,8 @@ namespace LiveCaptionsTranslator.services
             string draft = sentenceStart < text.Length
                 ? text[sentenceStart..].Trim()
                 : string.Empty;
-            while (TryTakeLongReadingUnit(draft, out string unit, out string remainder))
+            while (splitLongDrafts &&
+                   TryTakeLongReadingUnit(draft, out string unit, out string remainder))
             {
                 completed.Add(unit);
                 draft = remainder;

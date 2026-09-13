@@ -10,6 +10,8 @@ namespace LiveCaptionsTranslator.services
 {
     public sealed class LectureSummaryService
     {
+        public const int MaximumTranscriptSegments = 240;
+
         private static readonly HttpClient client = new()
         {
             Timeout = TimeSpan.FromSeconds(60)
@@ -70,7 +72,7 @@ namespace LiveCaptionsTranslator.services
             var lines = segments
                 .Where(segment => !string.IsNullOrWhiteSpace(segment.SourceText))
                 .OrderBy(segment => segment.CapturedAt)
-                .TakeLast(240)
+                .TakeLast(MaximumTranscriptSegments)
                 .Select(segment => string.IsNullOrWhiteSpace(segment.TranslatedText)
                     ? $"[{segment.CapturedAt.LocalDateTime:HH:mm:ss}] {segment.SourceText.Trim()}"
                     : $"[{segment.CapturedAt.LocalDateTime:HH:mm:ss}] 原文：{segment.SourceText.Trim()}\n译文：{segment.TranslatedText.Trim()}");

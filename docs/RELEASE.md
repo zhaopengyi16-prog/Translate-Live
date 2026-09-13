@@ -8,7 +8,30 @@ The repository is ready for public source review. It does not yet claim a signed
 
 Current public version: `0.1.0.0`
 
-Verified local baseline:
+### Caption recording preview (after `430df950`)
+
+This patch separates the fixed live-caption surface from complete classroom records. See [source review](SOURCE_REVIEW_2026-09-14.md) for root causes, remaining findings and limitations.
+
+Verified in the current Linux review environment with the pinned .NET SDK 10.0.400:
+
+- locked restore with `EnableWindowsTargeting=true`: successful; no lockfile or package changes;
+- full solution Release cross-build: **0 errors, 304 warnings**, matching the warning count of the unmodified baseline cross-build;
+- linked production-source portable test harness: **189 passed, 0 failed, 0 skipped**; uses actual logic/view-model/queue/repository classes and isolated SQLite, with a guard asserting no Windows host boundary is called;
+- win-x64 self-contained cross-publish: **409 files, 155,556,893 bytes** in `artifacts/caption-recording-win-x64`;
+- entry executable SHA-256: `1b4bbacadb4aefab8434494a925a488134b6c034a9006a6de2fc8f9679ad1b79`.
+- source and publish scans: no high-confidence key-format matches or runtime settings, credentials, databases, logs, or dumps included; no actual user secrets were read for exact-value matching.
+
+The portable harness is an additional Linux verification method; it does **not** execute the entire Windows-targeted test project. WPF, UI Automation, Live Captions, audio and DPAPI runtime checks cannot execute here. The full Windows test project and smoke executable cross-compile successfully; updated smoke assertions still require an isolated Windows desktop run. The preview is not a signed release or an installer.
+
+Regression coverage includes clipped sentence heads, unchanged-window replay and rotation, long draft growth, punctuation withdrawal, radical tail correction with stable neighbors, genuine repeats with growth/append evidence, provisional translations never entering history, same-request final promotion, original-only saving during a blocked provider, 80 queued finals beyond the matching ledger, old revisions and old classroom epochs, source-only placeholder protection, and explicit unfinished-source flush.
+
+On Windows, use a fresh temporary `LECTURE_COPILOT_DATA_ROOT`, then run `scripts/build.ps1`, `scripts/test.ps1`, and the existing smoke executable before release. Verify actual system audio/microphone, subtitle-window rebuild, slow provider responses, class switching, stopping with unfinished speech, enlarged fonts and history reading anchors. Do not reuse the older Windows success statement below as evidence for this patch.
+
+Remaining limits: source-only ambiguous repetitions are still heuristic; the unfinished badge is not persisted; an earlier unfinished sentence saved only at stop may reload after later complete records because the current schema lacks persisted recognition sequence. Separate credential-binding and SSE completion findings remain open in the source review.
+
+### Previously reported Windows baseline (before this patch)
+
+The repository previously recorded the following local baseline:
 
 - Windows x64;
 - .NET SDK 10.0.400;

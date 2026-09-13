@@ -17,7 +17,10 @@ namespace LiveCaptionsTranslator.models
         string SourceText,
         string? TranslatedText,
         SegmentState State,
-        DateTimeOffset CapturedAt);
+        DateTimeOffset CapturedAt,
+        long? SessionId = null,
+        long CaptureEpoch = 0,
+        bool IsIncomplete = false);
 
     public sealed record TranslationRequest(
         Guid SegmentId,

@@ -251,6 +251,9 @@ static int RunTimelineUiSmoke()
                 ?? throw new InvalidOperationException("Timeline scroll viewer was not created.");
 
             bool initiallyAtBottom = DistanceFromBottom(scroller) <= 2;
+            var draftPanel = timeline.FindName("DraftPanel") as FrameworkElement
+                ?? throw new InvalidOperationException("Live caption panel was not created.");
+            double initialLivePanelHeight = draftPanel.ActualHeight;
 
             scroller.ScrollToVerticalOffset(scroller.ScrollableHeight * 0.45);
             PumpDispatcher();
@@ -292,7 +295,7 @@ static int RunTimelineUiSmoke()
                 Math.Abs(beforeAnchor.Top - afterHeightChangeAnchor.Top) <= 1.5;
 
             Guid draftId = Guid.NewGuid();
-            viewModel.SetDraft(new TranscriptSegment(
+            var liveDraft = new TranscriptSegment(
                 draftId,
                 91,
                 0,
@@ -303,11 +306,15 @@ static int RunTimelineUiSmoke()
                     "长草稿保留全文，并限制面板高度。",
                     30)),
                 SegmentState.Draft,
-                startedAt.AddSeconds(91)));
+                startedAt.AddSeconds(91));
+            viewModel.SetDraft(liveDraft);
             PumpDispatcher();
-            var draftPanel = timeline.FindName("DraftPanel") as FrameworkElement
-                ?? throw new InvalidOperationException("Draft panel was not created.");
             bool draftHeightBounded = draftPanel.ActualHeight <= 190.5;
+            var afterLiveDraftAnchor = ReadFirstVisibleAnchor(list, scroller);
+            bool liveDraftPreservesViewport =
+                Math.Abs(draftPanel.ActualHeight - initialLivePanelHeight) <= 0.5 &&
+                beforeAnchor.Id == afterLiveDraftAnchor.Id &&
+                Math.Abs(beforeAnchor.Top - afterLiveDraftAnchor.Top) <= 1.5;
 
             application.Resources["LectureSubtitleFontSize"] = 28d;
             window.Width = 700;
@@ -316,6 +323,21 @@ static int RunTimelineUiSmoke()
             bool resizedWithoutOverflow =
                 draftPanel.ActualHeight <= 190.5 &&
                 scroller.ViewportHeight > 0;
+
+            TranscriptSegment finalizedLive = liveDraft with
+            {
+                Revision = 1,
+                SourceText = "The final sentence remains visible in the live caption area.",
+                TranslatedText = "完整句进入课堂记录后，实时区域仍保留最后一句。",
+                State = SegmentState.Translated
+            };
+            viewModel.ApplySegment(finalizedLive);
+            viewModel.ClearDraft(finalizedLive.Id, finalizedLive.Revision);
+            PumpDispatcher();
+            bool liveFinalRemainsVisible =
+                viewModel.HasLiveCaption &&
+                viewModel.LiveText == finalizedLive.SourceText &&
+                Math.Abs(draftPanel.ActualHeight - initialLivePanelHeight) <= 0.5;
 
             timeline.ReturnToLive();
             PumpDispatcher();
@@ -328,6 +350,8 @@ static int RunTimelineUiSmoke()
             Console.WriteLine($"TimelineAnchorHeldAfterHeightChange={anchorHeldAfterHeightChange}");
             Console.WriteLine($"TimelineDraftHeight={draftPanel.ActualHeight:F1}");
             Console.WriteLine($"TimelineDraftHeightBounded={draftHeightBounded}");
+            Console.WriteLine($"TimelineLiveDraftPreservesViewport={liveDraftPreservesViewport}");
+            Console.WriteLine($"TimelineLiveFinalRemainsVisible={liveFinalRemainsVisible}");
             Console.WriteLine($"TimelineResizeAndFontChange={resizedWithoutOverflow}");
             Console.WriteLine($"TimelineReturnedToLive={returnedToLive}");
 
@@ -335,6 +359,8 @@ static int RunTimelineUiSmoke()
                        queuedFollowCancelled &&
                        anchorHeldAfterHeightChange &&
                        draftHeightBounded &&
+                       liveDraftPreservesViewport &&
+                       liveFinalRemainsVisible &&
                        resizedWithoutOverflow &&
                        returnedToLive
                 ? 0

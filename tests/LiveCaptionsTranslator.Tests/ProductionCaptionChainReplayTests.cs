@@ -115,7 +115,230 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public async Task GrowingPunctuatedRecognitionUpdatesOneDatabaseAndWorkspaceRow()
+        public async Task RapidIdenticalFinalCandidatesAreAdmittedOnceAcrossProductionChain()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "LectureCopilot.Tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            string connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(root, "history.db"),
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false
+            }.ToString();
+
+            try
+            {
+                await CreateSchemaAsync(connectionString);
+                var repository = new LectureReviewRepository(connectionString);
+                LectureSessionEntry session = await repository.CreateSessionAsync(
+                    "同秒重复隔离回放",
+                    "",
+                    "Fake",
+                    "zh-CN");
+                TranslationSegmentPersistence persistence =
+                    CreatePersistence(repository);
+                int persistedCallbacks = 0;
+                int translationCalls = 0;
+                var queue = new TranslationTaskQueue(async (result, token) =>
+                {
+                    await persistence.UpsertAsync(
+                        new TranslationPersistenceRequest(
+                            result.SessionId!.Value,
+                            result.Identity!,
+                            result.OriginalText,
+                            result.TranslatedText,
+                            result.TargetLanguage,
+                            result.ApiName),
+                        token);
+                    Interlocked.Increment(ref persistedCallbacks);
+                });
+                var viewModel = new TranscriptSessionViewModel();
+                var admissionGate = new FinalCaptionAdmissionGate();
+                DateTimeOffset start = new(2026, 9, 13, 23, 19, 5, TimeSpan.Zero);
+                const string repeatedText =
+                    "Everything else kind of face into the background.";
+                LiveCaptionSegment[] candidates =
+                [
+                    new(Guid.NewGuid(), 1, 0, repeatedText, true, start),
+                    new(Guid.NewGuid(), 2, 0, repeatedText, true,
+                        start.AddMilliseconds(180)),
+                    new(Guid.NewGuid(), 3, 0, repeatedText, true,
+                        start.AddMilliseconds(420)),
+                    new(Guid.NewGuid(), 4, 0, repeatedText, true,
+                        start.AddMilliseconds(1050))
+                ];
+                int admittedCandidates = 0;
+
+                foreach (LiveCaptionSegment segment in candidates)
+                {
+                    FinalCaptionAdmissionDecision decision =
+                        admissionGate.Evaluate(segment, segment.CapturedAt);
+                    if (!decision.IsAdmitted)
+                        continue;
+
+                    admittedCandidates++;
+                    queue.Enqueue(
+                        (_, _) =>
+                        {
+                            Interlocked.Increment(ref translationCalls);
+                            return Task.FromResult<(string, bool)>(
+                                ("其他一切都在某种程度上退居背景。", true));
+                        },
+                        segment.Text,
+                        "Fake",
+                        session.Id,
+                        "zh-CN",
+                        Identity(segment),
+                        waitForPersistence: true);
+                    TranslationQueueResult result = await queue.ReadLatestResultAsync()
+                        .AsTask()
+                        .WaitAsync(TimeSpan.FromSeconds(2));
+                    viewModel.ApplySegment(new TranscriptSegment(
+                        result.Identity!.SegmentId,
+                        result.Identity.Sequence,
+                        result.Identity.Revision,
+                        result.OriginalText,
+                        result.TranslatedText,
+                        SegmentState.Translated,
+                        result.Identity.CapturedAt));
+                }
+
+                await WaitUntilAsync(() =>
+                    Volatile.Read(ref persistedCallbacks) == admittedCandidates);
+                await queue.WaitForPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(2));
+                List<PersistedRow> rows = await LoadRowsAsync(
+                    connectionString,
+                    session.Id);
+
+                Assert.AreEqual(1, translationCalls);
+                Assert.AreEqual(1, viewModel.Segments.Count);
+                Assert.AreEqual(1, rows.Count);
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [TestMethod]
+        public async Task AccessibilityDuplicateBurstCreatesOneTailRowAcrossProductionChain()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "LectureCopilot.Tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            string connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(root, "history.db"),
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false
+            }.ToString();
+
+            try
+            {
+                await CreateSchemaAsync(connectionString);
+                var repository = new LectureReviewRepository(connectionString);
+                LectureSessionEntry session = await repository.CreateSessionAsync(
+                    "重复爆发隔离回放",
+                    "",
+                    "Fake",
+                    "zh-CN");
+                TranslationSegmentPersistence persistence =
+                    CreatePersistence(repository);
+                int persistedCallbacks = 0;
+                int translationCalls = 0;
+                var queue = new TranslationTaskQueue(async (result, token) =>
+                {
+                    await persistence.UpsertAsync(
+                        new TranslationPersistenceRequest(
+                            result.SessionId!.Value,
+                            result.Identity!,
+                            result.OriginalText,
+                            result.TranslatedText,
+                            result.TargetLanguage,
+                            result.ApiName),
+                        token);
+                    Interlocked.Increment(ref persistedCallbacks);
+                });
+                var segmenter = new LiveCaptionSegmenter();
+                var viewModel = new TranscriptSessionViewModel();
+                var emitted = new List<LiveCaptionSegment>();
+                DateTimeOffset start = new(2026, 9, 13, 22, 10, 53, TimeSpan.Zero);
+                const string firstText =
+                    "Yes, I'll chat with you, give you instant feedback on.";
+                const string repeatedText = "I can speak with you.";
+                (string Text, DateTimeOffset At)[] replay =
+                [
+                    (firstText, start),
+                    ($"{firstText} {repeatedText}", start.AddSeconds(1)),
+                    ($"{repeatedText} {repeatedText}", start.AddMilliseconds(1250)),
+                    ($"{repeatedText} {repeatedText} {repeatedText}", start.AddMilliseconds(1500))
+                ];
+
+                foreach ((string snapshot, DateTimeOffset observedAt) in replay)
+                {
+                    LiveCaptionUpdate update = segmenter.Process(snapshot, observedAt);
+                    foreach (LiveCaptionSegment segment in update.FinalizedSegments)
+                    {
+                        emitted.Add(segment);
+                        queue.Enqueue(
+                            (_, _) =>
+                            {
+                                Interlocked.Increment(ref translationCalls);
+                                return Task.FromResult<(string, bool)>(
+                                    ($"译文 {segment.Sequence}", true));
+                            },
+                            segment.Text,
+                            "Fake",
+                            session.Id,
+                            "zh-CN",
+                            Identity(segment),
+                            waitForPersistence: true);
+                        TranslationQueueResult result = await queue.ReadLatestResultAsync()
+                            .AsTask()
+                            .WaitAsync(TimeSpan.FromSeconds(2));
+                        viewModel.ApplySegment(new TranscriptSegment(
+                            result.Identity!.SegmentId,
+                            result.Identity.Sequence,
+                            result.Identity.Revision,
+                            result.OriginalText,
+                            result.TranslatedText,
+                            SegmentState.Translated,
+                            result.Identity.CapturedAt));
+                    }
+                }
+
+                await WaitUntilAsync(() =>
+                    Volatile.Read(ref persistedCallbacks) == emitted.Count);
+                await queue.WaitForPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(2));
+                List<PersistedRow> rows = await LoadRowsAsync(
+                    connectionString,
+                    session.Id);
+
+                Assert.AreEqual(2, emitted.Count);
+                Assert.AreEqual(2, emitted.Select(item => item.Id).Distinct().Count());
+                Assert.AreEqual(2, translationCalls);
+                Assert.AreEqual(2, viewModel.Segments.Count);
+                Assert.AreEqual(2, rows.Count);
+                Assert.AreEqual(repeatedText, rows[^1].SourceText);
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [TestMethod]
+        [DataRow(false)]
+        [DataRow(true)]
+        public async Task GrowingPunctuatedRecognitionUpdatesOneDatabaseAndWorkspaceRow(
+            bool includeIntermediateDrafts)
         {
             string root = Path.Combine(
                 Path.GetTempPath(),
@@ -160,22 +383,37 @@ namespace LiveCaptionsTranslator.Tests
                 DateTimeOffset start = new(2026, 9, 11, 23, 4, 4, TimeSpan.Zero);
                 string[] snapshots =
                 [
-                    "Hello, can you speak my English and I will tell you what.",
-                    "Hello, can you speak my English and I will tell you what is I will say.",
-                    "Hello can you speak my English and I will tell you what is I will say in next time and.",
-                    "Hello, can you speak my English and I will tell you what is I will say in next time and you must record what?",
-                    "Hello, can you speak my English and I will tell you what is I will say in next time and you must record what I see."
+                    "And you know?",
+                    "And you know what happens?",
+                    "And you know what happens when captions arrive continuously?",
+                    "And you know what happens when captions arrive continuously during a fast lecture and punctuation changes?",
+                    "And you know what happens when captions arrive continuously during a fast lecture and punctuation changes while the speaker keeps talking without creating duplicate rows."
                 ];
+                string[] staleDraftReplays = [];
+
+                if (includeIntermediateDrafts)
+                {
+                    staleDraftReplays = snapshots
+                        .Skip(1)
+                        .Select(text => text.TrimEnd('.', '?'))
+                        .TakeLast(2)
+                        .ToArray();
+                    snapshots = snapshots.SelectMany((text, index) => index == 0
+                        ? new[] { text }
+                        : new[] { text.TrimEnd('.', '?'), text }).ToArray();
+                }
 
                 for (int index = 0; index < snapshots.Length; index++)
                 {
-                    LiveCaptionSegment segment = segmenter.Process(
+                    LiveCaptionUpdate update = segmenter.Process(
                         snapshots[index],
-                        start.AddSeconds(index * 2)).FinalizedSegments.Single();
+                        start.AddSeconds(index * 2));
+                    LiveCaptionSegment segment = update.DraftSegment ??
+                        update.FinalizedSegments.Single();
                     emitted.Add(segment);
                     queue.Enqueue(
                         (_, _) => Task.FromResult<(string, bool)>(
-                            ($"译文 revision {segment.Revision}", true)),
+                            ($"译文 revision {segment.Revision}", segment.IsFinal)),
                         segment.Text,
                         "Fake",
                         session.Id,
@@ -193,6 +431,17 @@ namespace LiveCaptionsTranslator.Tests
                         result.TranslatedText,
                         SegmentState.Translated,
                         result.Identity.CapturedAt));
+                }
+
+                for (int index = 0; index < staleDraftReplays.Length; index++)
+                {
+                    LiveCaptionUpdate rollback = segmenter.Process(
+                        staleDraftReplays[index],
+                        start.AddSeconds((snapshots.Length + index) * 2));
+                    Assert.IsNull(rollback.DraftSegment);
+                    Assert.IsEmpty(rollback.FinalizedSegments);
+                    Assert.AreEqual(emitted[^1].Id, rollback.CurrentSegment?.Id);
+                    Assert.AreEqual(snapshots[^1], rollback.CurrentText);
                 }
 
                 await WaitUntilAsync(() =>
@@ -310,10 +559,18 @@ namespace LiveCaptionsTranslator.Tests
         public async Task TwoEqualFinalUtterancesRemainTwoQueueResults()
         {
             var segmenter = new LiveCaptionSegmenter();
-            LiveCaptionSegment first = segmenter.Process("Hello.")
+            var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
+            LiveCaptionSegment first = segmenter.Process("Hello.", start)
                 .FinalizedSegments.Single();
-            LiveCaptionSegment second = segmenter.Process("Hello. Hello.")
+            LiveCaptionSegment repeatedDraft = segmenter.Process(
+                "Hello. Hel",
+                start.AddMilliseconds(500)).DraftSegment!;
+            LiveCaptionSegment second = segmenter.Process(
+                "Hello. Hello.",
+                start.AddSeconds(1))
                 .FinalizedSegments.Single();
+            Assert.AreEqual(repeatedDraft.Id, second.Id);
+            Assert.AreNotEqual(first.Id, second.Id);
             var persisted = new ConcurrentQueue<Guid>();
             var queue = new TranslationTaskQueue((result, _) =>
             {

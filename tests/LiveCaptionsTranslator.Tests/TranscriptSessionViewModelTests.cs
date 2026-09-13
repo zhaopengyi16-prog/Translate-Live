@@ -33,6 +33,19 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
+        public void RepeatedEventsForOneIdentityRemainOneVisibleRow()
+        {
+            var viewModel = new TranscriptSessionViewModel();
+            Guid id = Guid.NewGuid();
+
+            for (int index = 0; index < 4; index++)
+                viewModel.ApplySegment(Create(1, id, source: "Same sentence."));
+
+            Assert.HasCount(1, viewModel.Segments);
+            Assert.AreEqual(id, viewModel.Segments[0].Id);
+        }
+
+        [TestMethod]
         public void RevisionCannotMoveTheOriginalTimeOrSequence()
         {
             var viewModel = new TranscriptSessionViewModel();

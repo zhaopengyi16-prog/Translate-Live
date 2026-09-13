@@ -66,6 +66,15 @@ namespace LiveCaptionsTranslator.utils
                     continue;
                 }
 
+                // UI Automation can surface directional and zero-width format
+                // marks that WPF does not render. They must not make two visually
+                // identical caption snapshots look different to the segmenter.
+                System.Globalization.UnicodeCategory category =
+                    char.GetUnicodeCategory(current);
+                if (category is System.Globalization.UnicodeCategory.Format or
+                    System.Globalization.UnicodeCategory.Control)
+                    continue;
+
                 if (pendingWhitespace && ShouldInsertCaptionSpace(builder[^1], current))
                     builder.Append(' ');
 

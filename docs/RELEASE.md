@@ -1,6 +1,6 @@
 # Translate Live build and release guide
 
-Last updated: 2026-09-11
+Last updated: 2026-09-13
 
 ## Release status
 
@@ -14,7 +14,7 @@ Verified local baseline:
 - .NET SDK 10.0.400;
 - locked dependency restoration;
 - Release build successful;
-- 142 automated tests passing;
+- 167 automated tests passing;
 - self-contained win-x64 publish successful;
 - Windows Live Captions system-audio and microphone smoke checks successful in an isolated data root.
 - real WPF timeline smoke checks successful for queued-scroll cancellation, reading-anchor preservation, return-to-live, long-draft height, font enlargement, and window resizing.
@@ -32,6 +32,37 @@ Growing-final regression evidence:
 - the repaired production segmenter emits revisions `0` through `4` under one `SegmentId`;
 - the production queue, workspace view model, and isolated SQLite repository finish with one visible row and one database row containing the latest revision and the original capture time;
 - a long sentence with a shared opening but different later words remains a distinct sentence.
+
+Final-to-draft continuity regression evidence:
+
+- final → punctuationless growing draft → final retains one `SegmentId`, `Sequence`, and `CapturedAt` while advancing the revision;
+- replaying recent intermediate drafts or the same tail with punctuation removed emits no new draft or final event and leaves the latest segment unchanged;
+- an explicit appended sentence remains a new identity, and an identical utterance that starts from a new short draft is retained as a genuine repeat;
+- the production segmenter, revision-aware queue, workspace view model, and isolated SQLite repository pass with and without intermediate punctuationless drafts;
+- existing classroom rows are not rewritten or deduplicated by this change.
+
+Rapid-continuity regression evidence:
+
+- before the short-tail fix, `And you know? → And you know what → And you know what?` created a second identity, while `Can him remind your voice? → Can him remind your → original final` created a new draft that finalized as a duplicate;
+- a four-second, position-supported lexical-prefix window now keeps those recognizer revisions on the current identity without adding translation latency;
+- a rapid 13-frame continuous-speech replay covering provisional punctuation, temporary shortening, restoration, and long growth finishes with one identity, its first capture time, one workspace row, and one isolated SQLite row;
+- appended different sentences, repeated speech that begins from a new short draft, and short-prefix growth outside the evidence window remain separate identities.
+
+Accessibility duplicate-burst regression evidence:
+
+- before the fix, the screenshot-derived replay `previous sentence → current sentence → current sentence ×2 → current sentence ×3` emitted four identities, made four translation calls, displayed four rows, and persisted four SQLite rows;
+- the repaired production chain emits the previous sentence and current sentence once each, producing two identities, two translation calls, two workspace rows, and two isolated SQLite rows; adjacent repeats already present in the same accessibility snapshot are also collapsed before translation;
+- Unicode direction and zero-width format marks exposed by UI Automation no longer change normalized caption identity text;
+- a real repeated utterance is still retained when a fresh draft grows, a different sentence intervenes, or an exact append occurs outside the three-second accessibility burst;
+- this classification does not wait before submitting ordinary final captions and does not rewrite existing classroom history.
+
+Final-admission regression evidence:
+
+- the screenshot-derived production replay supplies four visually and textually identical completed candidates with four different local identities between `23:19:05.000` and `23:19:06.050`;
+- before the final-admission fix, the real queue/view-model/persistence chain made four translation calls, displayed four rows, and wrote four isolated SQLite rows;
+- after the fix, the same replay makes one translation call, displays one row, and writes one isolated SQLite row; continuously recycled exact candidates every 250 ms for ten seconds also remain one logical final;
+- the gate runs before translation, display history, overlay context, and persistence and adds no fixed waiting period;
+- a same-identity revision, a repeated utterance with fresh draft evidence, a repeat after an intervening different final, a repeat after a quiet gap, and a new classroom session remain independently admitted.
 
 ## Supported release target
 

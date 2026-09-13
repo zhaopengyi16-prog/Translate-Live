@@ -47,6 +47,22 @@ namespace LiveCaptionsTranslator.services
         public const int RevisionTextCapacity = 4;
         public static readonly TimeSpan RecentLedgerRetention =
             TimeSpan.FromMinutes(2);
+
+        // Live Captions can temporarily punctuate a short phrase and then
+        // continue or shorten it. Position, lexical boundaries, and this small
+        // evidence window allow correction without delaying translation.
+        public static readonly TimeSpan ShortTailRevisionWindow =
+            TimeSpan.FromSeconds(4);
+        public const int ShortTailMinimumLatinWords = 3;
+        public const int ShortTailMinimumCjkCharacters = 4;
+        public const double ShortTailRollbackMinimumLengthRatio = 0.60;
+
+        // During rapid layout recycling, the Live Captions accessibility window
+        // can append the same completed tail row more than once. Suppress only an
+        // adjacent exact repeat with no draft evidence inside this short burst.
+        public static readonly TimeSpan AccessibilityDuplicateBurstWindow =
+            TimeSpan.FromSeconds(3);
+        public const int FinalAdmissionAliasCapacity = RecentLedgerCapacity * 4;
     }
 
     /// <summary>
@@ -101,23 +117,63 @@ namespace LiveCaptionsTranslator.services
                 string text,
                 DateTimeOffset observedAt)
             {
-                string previous = NormalizeIdentityText(Segment.Text);
+                return AcceptRevision(Segment with
+                {
+                    Revision = Segment.Revision + 1,
+                    Text = text,
+                    IsFinal = true
+                }, observedAt);
+            }
+
+            public LiveCaptionSegment AcceptRevision(
+                LiveCaptionSegment revised,
+                DateTimeOffset observedAt)
+            {
+                RememberHistoricalText(NormalizeIdentityText(Segment.Text));
+                Segment = revised;
+                LastForwardObservedAt = observedAt;
+                LastSeenAt = observedAt;
+                return Segment;
+            }
+
+            public void RememberRevisionText(
+                string text,
+                DateTimeOffset observedAt)
+            {
+                string normalized = NormalizeIdentityText(text);
+                bool isKnown = normalized.Length == 0 ||
+                    string.Equals(
+                        NormalizeIdentityText(Segment.Text),
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    previousTexts.Any(previous => string.Equals(
+                        previous,
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase));
+                if (!isKnown)
+                    RememberHistoricalText(normalized);
+
+                LastForwardObservedAt = observedAt;
+                LastSeenAt = observedAt;
+            }
+
+            private void RememberHistoricalText(string normalized)
+            {
+                if (normalized.Length == 0 ||
+                    previousTexts.Any(previous => string.Equals(
+                        previous,
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase)))
+                {
+                    return;
+                }
+
                 if (previousTexts.Count ==
                     LiveCaptionSegmentationThresholds.RevisionTextCapacity)
                 {
                     previousTexts.Dequeue();
                 }
-                previousTexts.Enqueue(previous);
-
-                Segment = Segment with
-                {
-                    Revision = Segment.Revision + 1,
-                    Text = text,
-                    IsFinal = true
-                };
-                LastForwardObservedAt = observedAt;
-                LastSeenAt = observedAt;
-                return Segment;
+                previousTexts.Enqueue(normalized);
             }
         }
 
@@ -182,6 +238,18 @@ namespace LiveCaptionsTranslator.services
 
                 if (string.Equals(normalized, previousSnapshot, StringComparison.Ordinal))
                     return BuildUpdate(normalized, [], observedAt);
+
+                Dictionary<Guid, DateTimeOffset> previousLastSeen = recentSegments
+                    .ToDictionary(entry => entry.Segment.Id, entry => entry.LastSeenAt);
+
+                if (IsHistoricalTailDraftRollback(
+                        completed,
+                        observedDraft,
+                        observedAt))
+                {
+                    previousSnapshot = normalized;
+                    return BuildUpdate(normalized, [], observedAt);
+                }
 
                 var currentCompleted = new List<LiveCaptionSegment>(completed.Count);
                 var finalized = new List<LiveCaptionSegment>();
@@ -302,6 +370,14 @@ namespace LiveCaptionsTranslator.services
                         activeDraft = null;
                         activeDraftEligible = false;
                     }
+                    else if (IsRapidAccessibilityTailDuplicate(
+                                 candidate,
+                                 currentCompleted,
+                                 previousLastSeen,
+                                 observedAt))
+                    {
+                        continue;
+                    }
                     else
                     {
                         segment = CreateSegment(candidate, isFinal: true, observedAt);
@@ -316,6 +392,7 @@ namespace LiveCaptionsTranslator.services
                 UpdateDraft(
                     observedDraft,
                     observedAt,
+                    canContinueFinal: completed.Count == 0,
                     hasCompletedSentences:
                         finalized.Count > 0 ||
                         (activeDraft == null && currentCompleted.Count > 0));
@@ -368,6 +445,53 @@ namespace LiveCaptionsTranslator.services
                 }
             }
             return -1;
+        }
+
+        private bool IsRapidAccessibilityTailDuplicate(
+            string candidate,
+            IReadOnlyList<LiveCaptionSegment> currentCompleted,
+            IReadOnlyDictionary<Guid, DateTimeOffset> previousLastSeen,
+            DateTimeOffset observedAt)
+        {
+            if (currentCompleted.Count == 0 ||
+                !HasExplicitSentenceEnding(candidate))
+                return false;
+
+            LiveCaptionSegment currentTail = currentCompleted[^1];
+            if (!string.Equals(
+                    NormalizeIdentityText(currentTail.Text),
+                    NormalizeIdentityText(candidate),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            bool existedBeforeSnapshot = previousLastSeen.TryGetValue(
+                currentTail.Id,
+                out DateTimeOffset lastSeen);
+            bool createdInCurrentSnapshot =
+                !existedBeforeSnapshot && currentTail.CapturedAt == observedAt;
+            if (!createdInCurrentSnapshot &&
+                (!existedBeforeSnapshot ||
+                 observedAt < lastSeen ||
+                 observedAt - lastSeen >
+                    LiveCaptionSegmentationThresholds.AccessibilityDuplicateBurstWindow))
+            {
+                return false;
+            }
+
+            recentSegments.FirstOrDefault(
+                entry => entry.Segment.Id == currentTail.Id)?.MarkSeen(observedAt);
+            return true;
+        }
+
+        private static bool HasExplicitSentenceEnding(string text)
+        {
+            string normalized = TextUtil.NormalizeCaptionWhitespace(text)
+                .TrimEnd(ClosingPunctuation)
+                .TrimEnd();
+            return normalized.Length > 0 &&
+                   Array.IndexOf(TextUtil.PUNC_EOS, normalized[^1]) >= 0;
         }
 
         private static bool TryReconcileDraftCompletion(
@@ -600,7 +724,10 @@ namespace LiveCaptionsTranslator.services
                 .FirstOrDefault(candidate => candidate.Segment.Id == segment.Id);
             if (existing != null)
             {
-                existing.MarkSeen(observedAt);
+                if (segment.Revision > existing.Segment.Revision)
+                    existing.AcceptRevision(segment, observedAt);
+                else
+                    existing.MarkSeen(observedAt);
                 return;
             }
 
@@ -662,6 +789,7 @@ namespace LiveCaptionsTranslator.services
         private void UpdateDraft(
             string observedDraft,
             DateTimeOffset observedAt,
+            bool canContinueFinal,
             bool hasCompletedSentences)
         {
             if (observedDraft.Length == 0)
@@ -676,7 +804,46 @@ namespace LiveCaptionsTranslator.services
 
             if (activeDraft == null)
             {
-                activeDraft = CreateSegment(observedDraft, isFinal: false, observedAt);
+                // Temporary terminal punctuation can disappear as the same
+                // tail continues. Explicit appended drafts and new short-prefix
+                // utterances must still receive their own identity.
+                RecentSegmentEntry? continuationEntry = null;
+                if (canContinueFinal &&
+                    lastFinal != null &&
+                    previousCompleted.LastOrDefault()?.Id == lastFinal.Id)
+                {
+                    continuationEntry = recentSegments.FirstOrDefault(
+                        entry => entry.Segment.Id == lastFinal.Id);
+                }
+                bool continuesFinal = canContinueFinal &&
+                    lastFinal != null &&
+                    previousCompleted.LastOrDefault()?.Id == lastFinal.Id &&
+                    continuationEntry != null &&
+                    NormalizeLexicalText(observedDraft).Length >
+                        NormalizeLexicalText(lastFinal.Text).Length &&
+                    (IsLongLexicalPrefixRevision(lastFinal.Text, observedDraft) ||
+                     IsRecentShortTailGrowth(
+                         continuationEntry,
+                         lastFinal.Text,
+                         observedDraft,
+                         observedAt));
+                if (continuesFinal)
+                {
+                    LiveCaptionSegment previousFinal = lastFinal!;
+                    activeDraft = previousFinal with
+                    {
+                        Revision = previousFinal.Revision + 1,
+                        Text = observedDraft,
+                        IsFinal = false
+                    };
+                    continuationEntry!.RememberRevisionText(
+                        observedDraft,
+                        observedAt);
+                }
+                else
+                {
+                    activeDraft = CreateSegment(observedDraft, isFinal: false, observedAt);
+                }
                 activeDraftChangedAt = observedAt;
                 activeDraftEligible = true;
                 return;
@@ -694,6 +861,7 @@ namespace LiveCaptionsTranslator.services
                         Revision = activeDraft.Revision + 1,
                         Text = reconciled
                     };
+                    RememberContinuedDraftRevision(activeDraft, observedAt);
                     activeDraftChangedAt = observedAt;
                     activeDraftEligible = true;
                 }
@@ -703,6 +871,131 @@ namespace LiveCaptionsTranslator.services
             activeDraft = CreateSegment(observedDraft, isFinal: false, observedAt);
             activeDraftChangedAt = observedAt;
             activeDraftEligible = true;
+        }
+
+        private bool IsHistoricalTailDraftRollback(
+            IReadOnlyList<string> completed,
+            string observedDraft,
+            DateTimeOffset observedAt)
+        {
+            if (completed.Count != 0 ||
+                observedDraft.Length == 0 ||
+                activeDraft != null ||
+                lastFinal == null ||
+                previousCompleted.LastOrDefault()?.Id != lastFinal.Id)
+            {
+                return false;
+            }
+
+            RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                candidate => candidate.Segment.Id == lastFinal.Id);
+            if (entry == null ||
+                (!entry.IsCurrentText(observedDraft) &&
+                 !entry.IsHistoricalRevision(observedDraft) &&
+                 !IsRecentShortTailRollback(
+                     entry,
+                     observedDraft,
+                     observedAt)))
+            {
+                return false;
+            }
+
+            entry.MarkSeen(observedAt);
+            return true;
+        }
+
+        private static bool IsRecentShortTailGrowth(
+            RecentSegmentEntry entry,
+            string previous,
+            string current,
+            DateTimeOffset observedAt)
+        {
+            if (!IsInsideShortTailRevisionWindow(entry, observedAt))
+                return false;
+
+            string left = NormalizeLexicalText(previous);
+            string right = NormalizeLexicalText(current);
+            return right.Length > left.Length &&
+                   HasShortTailEvidence(left) &&
+                   IsLexicalPrefixAtBoundary(right, left);
+        }
+
+        private static bool IsRecentShortTailRollback(
+            RecentSegmentEntry entry,
+            string observedDraft,
+            DateTimeOffset observedAt)
+        {
+            if (!IsInsideShortTailRevisionWindow(entry, observedAt))
+                return false;
+
+            string current = NormalizeLexicalText(entry.Segment.Text);
+            string observed = NormalizeLexicalText(observedDraft);
+            if (observed.Length == 0 ||
+                observed.Length >= current.Length ||
+                !HasShortTailEvidence(observed) ||
+                (double)observed.Length / current.Length <
+                    LiveCaptionSegmentationThresholds
+                        .ShortTailRollbackMinimumLengthRatio)
+            {
+                return false;
+            }
+
+            return IsLexicalPrefixAtBoundary(current, observed);
+        }
+
+        private static bool IsInsideShortTailRevisionWindow(
+            RecentSegmentEntry entry,
+            DateTimeOffset observedAt)
+        {
+            if (observedAt < entry.LastForwardObservedAt)
+                return false;
+
+            return observedAt - entry.LastForwardObservedAt <=
+                   LiveCaptionSegmentationThresholds.ShortTailRevisionWindow;
+        }
+
+        private static bool HasShortTailEvidence(string text)
+        {
+            int cjkCount = text.Count(TextUtil.isCJChar);
+            if (cjkCount > 0)
+            {
+                return cjkCount >= LiveCaptionSegmentationThresholds
+                    .ShortTailMinimumCjkCharacters;
+            }
+
+            return text.Split(
+                ' ',
+                StringSplitOptions.RemoveEmptyEntries).Length >=
+                LiveCaptionSegmentationThresholds.ShortTailMinimumLatinWords;
+        }
+
+        private static bool IsLexicalPrefixAtBoundary(
+            string text,
+            string prefix)
+        {
+            if (prefix.Length == 0 ||
+                !text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            if (text.Length == prefix.Length)
+                return true;
+
+            return char.IsWhiteSpace(text[prefix.Length]) ||
+                   TextUtil.isCJChar(text[prefix.Length]);
+        }
+
+        private void RememberContinuedDraftRevision(
+            LiveCaptionSegment draft,
+            DateTimeOffset observedAt)
+        {
+            if (lastFinal?.Id != draft.Id)
+                return;
+
+            recentSegments.FirstOrDefault(
+                entry => entry.Segment.Id == draft.Id)?.RememberRevisionText(
+                    draft.Text,
+                    observedAt);
         }
 
         private LiveCaptionUpdate BuildUpdate(

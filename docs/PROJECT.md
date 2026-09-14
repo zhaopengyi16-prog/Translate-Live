@@ -14,8 +14,9 @@ Current scope:
 - an independent model configuration for class summaries;
 - a configurable subtitle overlay;
 - local credential protection and recoverable settings migration.
+- a selectable experimental local English ASR path with Windows Live Captions retained as the default fallback.
 
-The project does not currently provide an installer, code signing, or an independent ASR engine.
+The project does not currently provide an installer or code signing. The independent ASR path is an experiment and is not yet the stable default.
 
 ## Baselines
 
@@ -34,7 +35,7 @@ The project does not currently provide an installer, code signing, or an indepen
 | Target framework | `net10.0-windows` |
 | SDK | .NET SDK 10.0.400, pinned by `global.json` |
 | Platforms | win-x64 and win-arm64 configured; win-x64 is the verified release target |
-| Speech-to-text | Windows Live Captions through UI Automation |
+| Speech-to-text | Windows Live Captions through UI Automation (default); sherpa-onnx 1.13.8 with WASAPI (experimental local English path) |
 | Local data | Microsoft.Data.Sqlite 10.0.11 |
 | Export | CsvHelper 33.0.1 |
 | Credentials | Windows DPAPI `CurrentUser` |
@@ -47,6 +48,7 @@ The project does not currently provide an installer, code signing, or an indepen
 | WPF application | `src/App.xaml(.cs)` | Confirmed by the main project | Confirmed by WPF startup |
 | Main workspace | `src/pages/LectureWorkspacePage.*` | Confirmed | Created by `MainWindow` navigation |
 | Live Captions capture | `src/utils/LiveCaptionsHandler.cs` | Confirmed | Started by `Translator.ConnectLiveCaptionsAsync` |
+| Local ASR capture | `src/services/recognition/` | Confirmed | Started by `Translator.StartLocalAsrAsync` for the selected class source |
 | Translation queue | `src/models/TranslationTaskQueue.cs` | Confirmed | Driven by `Translator.TranslateLoop` |
 | History storage | `src/utils/HistoryLogger.cs` and repository classes | Confirmed | Initialized by `App.OnStartup` |
 | Summary service | `src/services/LectureSummaryService.cs` | Confirmed | Invoked from the workspace summary action |
@@ -65,8 +67,9 @@ App startup
   +-- start capture, translation, and display workers
 
 Windows audio or microphone
-  -> Windows Live Captions
-  -> UI Automation capture
+  -> selected recognition source
+     +-> Windows Live Captions -> UI Automation capture
+     +-> WASAPI -> sherpa-onnx streaming recognizer (experimental)
   -> position-aware caption stabilization
   -> stable SessionId / SegmentId / Revision identity
   -> revision-aware translation task queue
@@ -77,6 +80,11 @@ Windows audio or microphone
 ~~~
 
 ### Subtitle-chain invariants
+
+- One class binds exactly one recognition source and one capture epoch. Windows-window snapshots keep the existing position-aware resolver; native local-ASR callbacks receive their `SessionId`, `SegmentId`, `Sequence`, `CapturedAt`, and `Revision` once at the recognition boundary and downstream code must not infer a second identity from text.
+- Local-ASR partial hypotheses update one live draft in place. Only an endpoint or explicit class stop creates a final timeline/database record. Repeated partial text is idempotent, stale source revisions are rejected, and a new post-endpoint utterance receives a new identity even when its text is equal to earlier speech.
+- Local system audio uses Windows process-loopback capture and excludes the Translate Live process tree, preventing the app's own sounds from feeding recognition. The feature requires Windows 10 build 19041 or later. Microphone capture requests 16 kHz mono float audio. Both paths use a bounded 32-frame queue and report dropped frames without recording raw audio or caption text in diagnostics.
+- The optional model is fetched outside Git, hash-verified, and copied beside the experimental binary with `MODEL-NOTICE.txt`. Windows Live Captions remains the default and can be selected for the next class without changing classroom data.
 
 - The fixed live-caption surface displays the current source and provisional translation. Provisional updates do not create classroom timeline rows or SQLite records. The old separate Draft badge is not shown; history virtualization and reading anchors remain active.
 - `CaptionRecordingPolicy` admits an identity-resolved, punctuated sentence after a forward successor or 800 ms of unchanged observations. That interval affects classroom recording only; translation can start before admission. Removing punctuation or revising the source restarts this recording decision. Time never proves that equal text is a new occurrence.

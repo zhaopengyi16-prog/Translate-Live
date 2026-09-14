@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -8,6 +9,7 @@ using System.Windows.Threading;
 
 using LiveCaptionsTranslator.models;
 using LiveCaptionsTranslator.services;
+using LiveCaptionsTranslator.services.recognition;
 using LiveCaptionsTranslator.utils;
 using LiveCaptionsTranslator.viewmodels;
 
@@ -36,6 +38,7 @@ namespace LiveCaptionsTranslator
         private bool initialized;
         private bool settingSubscribed;
         private bool liveCaptionsConnectionSubscribed;
+        private bool localAsrStatusSubscribed;
         private bool historyProjectionInitializing;
         private MainWindow? ownerWindow;
 
@@ -74,6 +77,11 @@ namespace LiveCaptionsTranslator
                 Translator.LiveCaptionsConnectionChanged += OnLiveCaptionsConnectionChanged;
                 liveCaptionsConnectionSubscribed = true;
             }
+            if (!localAsrStatusSubscribed)
+            {
+                Translator.LocalAsrStatusChanged += OnLocalAsrStatusChanged;
+                localAsrStatusSubscribed = true;
+            }
             RefreshEngineSummary();
 
             if (initialized)
@@ -84,12 +92,18 @@ namespace LiveCaptionsTranslator
             Translator.TranscriptSegmentChanged += OnTranscriptSegmentChanged;
             Translator.TranscriptDraftChanged += OnTranscriptDraftChanged;
 
-            viewModel.LiveCaptionsStatus = Translator.Window == null
-                ? "Live Captions 未连接"
-                : "Live Captions 已就绪";
-            viewModel.SessionStatus = Translator.Window == null
-                ? "等待 Windows 实时字幕恢复"
-                : "等待课程声音";
+            bool localSource = Translator.Setting?.CaptionSource ==
+                CaptionSourceKind.LocalSherpaOnnx;
+            viewModel.LiveCaptionsStatus = localSource
+                ? "本地 ASR 已选择"
+                : Translator.Window == null
+                    ? "Live Captions 未连接"
+                    : "Live Captions 已就绪";
+            viewModel.SessionStatus = localSource
+                ? "开始课堂时将加载本地英文识别模型"
+                : Translator.Window == null
+                    ? "等待 Windows 实时字幕恢复"
+                    : "等待课程声音";
             try
             {
                 await LoadRecentHistoryAsync(clearTimeline: true);
@@ -115,6 +129,11 @@ namespace LiveCaptionsTranslator
                 Translator.LiveCaptionsConnectionChanged -= OnLiveCaptionsConnectionChanged;
                 liveCaptionsConnectionSubscribed = false;
             }
+            if (localAsrStatusSubscribed)
+            {
+                Translator.LocalAsrStatusChanged -= OnLocalAsrStatusChanged;
+                localAsrStatusSubscribed = false;
+            }
             if (ownerWindow != null)
                 ownerWindow.SizeChanged -= OwnerWindow_SizeChanged;
         }
@@ -126,6 +145,9 @@ namespace LiveCaptionsTranslator
                 Dispatcher.BeginInvoke(() => OnLiveCaptionsConnectionChanged(connected));
                 return;
             }
+
+            if (Translator.Setting?.CaptionSource == CaptionSourceKind.LocalSherpaOnnx)
+                return;
 
             viewModel.LiveCaptionsStatus = connected
                 ? "Live Captions 已就绪"
@@ -142,10 +164,28 @@ namespace LiveCaptionsTranslator
             }
         }
 
+        private void OnLocalAsrStatusChanged(string status)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(() => OnLocalAsrStatusChanged(status));
+                return;
+            }
+
+            viewModel.LiveCaptionsStatus = status == "running"
+                ? "本地 ASR 正在工作"
+                : "本地 ASR 需要检查";
+            if (status == "audio-queue-overflow")
+                viewModel.SessionStatus = "本机识别暂时跟不上音频，已跳过过期缓冲";
+            else if (status != "running")
+                viewModel.SessionStatus = "本地 ASR 出现问题；课堂原文仍按已接收内容保存";
+        }
+
         private void Setting_PropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
             if (string.IsNullOrEmpty(e.PropertyName) ||
                 e.PropertyName is nameof(Setting.ApiName) or nameof(Setting.TargetLanguage) or
+                    nameof(Setting.CaptionSource) or
                     nameof(Setting.Configs) or nameof(Setting.ActiveEngineDisplayName) or
                     nameof(Setting.Summary) or nameof(Setting.SummaryEngineDisplayName))
             {
@@ -156,9 +196,16 @@ namespace LiveCaptionsTranslator
         private void RefreshEngineSummary()
         {
             var setting = Translator.Setting;
-            EngineText.Text = $"{setting?.ActiveEngineDisplayName ?? "未选择"} · 实时翻译";
+            EngineText.Text = $"{setting?.ActiveEngineDisplayName ?? "未选择"} · 实时翻译 · " +
+                $"{setting?.CaptionSourceDisplayName ?? "Windows Live Captions"}";
             LanguageText.Text = $"English → {setting?.TargetLanguage ?? "zh-CN"}";
             SummaryEngineText.Text = $"总结模型：{setting?.SummaryEngineDisplayName ?? "未配置"}";
+            if (!viewModel.CanEndSession &&
+                setting?.CaptionSource == CaptionSourceKind.LocalSherpaOnnx)
+            {
+                viewModel.LiveCaptionsStatus = "本地 ASR 已选择";
+                viewModel.SessionStatus = "开始课堂时将加载本地英文识别模型";
+            }
         }
 
         private async void GenerateSummary_Click(object sender, RoutedEventArgs e)
@@ -661,7 +708,22 @@ namespace LiveCaptionsTranslator
                 return;
             }
 
+            if (Translator.Setting.CaptionSource == CaptionSourceKind.LocalSherpaOnnx)
+            {
+                await EnterLocalAsrCaptureModeAsync(microphoneMode, token);
+                return;
+            }
+
             var liveCaptionsWindow = Translator.Window;
+            if (liveCaptionsWindow == null)
+            {
+                viewModel.LiveCaptionsStatus = "正在连接 Live Captions";
+                bool connected = await Translator.ConnectLiveCaptionsAsync(
+                    userInitiated: true,
+                    token);
+                token.ThrowIfCancellationRequested();
+                liveCaptionsWindow = connected ? Translator.Window : null;
+            }
             if (liveCaptionsWindow == null)
             {
                 viewModel.LiveCaptionsStatus = "Live Captions 未连接";
@@ -804,6 +866,110 @@ namespace LiveCaptionsTranslator
             LiveCaptionsHandler.HideLiveCaptions(liveCaptionsWindow);
         }
 
+        private async Task EnterLocalAsrCaptureModeAsync(
+            bool microphoneMode,
+            CancellationToken token)
+        {
+            Setting setting = Translator.Setting
+                ?? throw new InvalidOperationException("Settings are not loaded.");
+            string mode = microphoneMode
+                ? "线下课堂 · 麦克风 · 本地 ASR"
+                : "在线课程 · 电脑声音 · 本地 ASR";
+            viewModel.CaptureMode = mode;
+            viewModel.MicrophoneStatus = microphoneMode
+                ? "正在打开本地麦克风…"
+                : "未使用麦克风";
+            viewModel.LiveCaptionsStatus = "正在加载本地 ASR";
+            viewModel.SessionStatus = "正在准备本地英文识别模型";
+
+            await Translator.StopCaptureAndFlushAsync(token);
+            await LectureSessionTracker.EndCurrentAsync(
+                viewModel.SummaryText,
+                token);
+            viewModel.CanEndSession = false;
+            long epoch = await Translator.PrepareLocalCaptureEpochAsync(token);
+            LectureSessionEntry? session = null;
+
+            try
+            {
+                session = await LectureSessionTracker.BeginAsync(
+                    mode,
+                    setting.ActiveEngineDisplayName,
+                    setting.TargetLanguage,
+                    token);
+                BindNewCaptureSession(session);
+                await Translator.StartLocalAsrAsync(
+                    epoch,
+                    session.Id,
+                    microphoneMode,
+                    setting.LocalAsrModelDirectory,
+                    token);
+                token.ThrowIfCancellationRequested();
+
+                viewModel.CanEndSession = true;
+                viewModel.LiveCaptionsStatus = "本地 ASR 正在工作";
+                viewModel.MicrophoneStatus = microphoneMode
+                    ? "本地麦克风已开启"
+                    : "正在捕捉电脑声音";
+                viewModel.SessionStatus = microphoneMode
+                    ? "正在本机识别线下课堂"
+                    : "正在本机识别电脑声音";
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                await AbortLocalAsrStartupAsync(epoch, session);
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is not OperationCanceledException)
+            {
+                await AbortLocalAsrStartupAsync(epoch, session);
+                ProductDiagnostics.Write(
+                    $"local-asr.startup-failed.{exception.GetType().Name}");
+                viewModel.LiveCaptionsStatus = "本地 ASR 启动失败";
+                viewModel.MicrophoneStatus = microphoneMode
+                    ? "麦克风未开启"
+                    : "电脑声音未开始捕捉";
+                viewModel.SessionStatus = exception is LocalAsrModelValidationException or
+                    FileNotFoundException
+                        ? "本地模型文件不完整，请在设置中检查模型目录"
+                        : "本地识别启动失败，可切回 Windows Live Captions";
+            }
+        }
+
+        private async Task AbortLocalAsrStartupAsync(
+            long epoch,
+            LectureSessionEntry? session)
+        {
+            Translator.SuspendLocalCapture(epoch);
+            try
+            {
+                using var stopTimeout = new CancellationTokenSource(
+                    TimeSpan.FromSeconds(5));
+                await Translator.StopCaptureAndFlushAsync(stopTimeout.Token);
+            }
+            catch (Exception exception) when (
+                exception is OperationCanceledException or TimeoutException)
+            {
+                ProductDiagnostics.Write("local-asr.startup-stop-timeout", exception);
+            }
+
+            if (session == null)
+                return;
+            try
+            {
+                using var sessionTimeout = new CancellationTokenSource(
+                    TimeSpan.FromSeconds(5));
+                await LectureSessionTracker.AbortCurrentIfEmptyAsync(
+                    session.Id,
+                    sessionTimeout.Token);
+            }
+            finally
+            {
+                UnbindCaptureSession(session.Id);
+            }
+        }
+
         private async Task StopDemoAsync()
         {
             if (!viewModel.IsDemoRunning)
@@ -822,7 +988,9 @@ namespace LiveCaptionsTranslator
 
         private async Task EndLectureSessionAsync(CancellationToken token)
         {
-            if (Translator.Window != null && LiveCaptionsMicrophoneProbe.WasEnabledByCurrentApp)
+            if (Translator.ActiveCaptionSource == CaptionSourceKind.WindowsLiveCaptions &&
+                Translator.Window != null &&
+                LiveCaptionsMicrophoneProbe.WasEnabledByCurrentApp)
             {
                 await RestoreLiveCaptionsForMicrophoneControlAsync(
                     Translator.Window,
@@ -845,9 +1013,12 @@ namespace LiveCaptionsTranslator
             await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText, token);
             token.ThrowIfCancellationRequested();
             viewModel.CanEndSession = false;
-            viewModel.LiveCaptionsStatus = Translator.Window == null
-                ? "Live Captions 未连接"
-                : "Live Captions 已就绪";
+            viewModel.LiveCaptionsStatus =
+                Translator.Setting?.CaptionSource == CaptionSourceKind.LocalSherpaOnnx
+                    ? "本地 ASR 已选择"
+                    : Translator.Window == null
+                        ? "Live Captions 未连接"
+                        : "Live Captions 已就绪";
             viewModel.SessionStatus = "课堂已结束，记录已按本次课堂保存";
             viewModel.ElapsedText = "00:00:00";
             if (ownerWindow != null)

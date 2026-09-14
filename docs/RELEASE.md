@@ -142,6 +142,38 @@ Downstream identity evidence:
 
 The first supported binary target is `win-x64`. The project declares `win-arm64`, but ARM64 must not be advertised as verified until it has an independent build and desktop integration run.
 
+## Experimental local-ASR build
+
+The `exp/local-asr-sherpa-v1` line is deliberately separate from the stable Windows Live Captions baseline `baseline/livecaptions-stable` (`2d7a6856aaef38fadfd957a53f5dbe8804461dad`). It adds a selectable local English recognizer and does not change existing classroom databases or credentials.
+
+~~~powershell
+$model = ./scripts/fetch-local-asr-model.ps1
+./scripts/publish-dev.ps1 `
+    -LocalAsrModelRoot $model `
+    -OutputDirectory artifacts/local-asr-sherpa-v1-win-x64
+~~~
+
+The model download is verified against SHA-256 `9C559283E8498D3FE95913C79CA1CB454BB26281AC2B102B41306C7D752765D9`. The source archive and validation WAVs remain under ignored `.artifacts/`; published output receives only runtime model files and `MODEL-NOTICE.txt`. See `THIRD-PARTY-NOTICES.md` for NAudio, sherpa-onnx, model, and training-corpus terms.
+
+Required experimental checks are: deterministic model-WAV decoding, two-file process-loopback recognition, first microphone open/start/stop, the full unit suite, the real WPF timeline smoke, and a self-contained win-x64 publish. All checks must use a new `LECTURE_COPILOT_DATA_ROOT`; smoke output reports counts and safe error codes only, never recognized text.
+
+Known limits: the compact model is English-only; accuracy is not equivalent to cloud ASR or Windows Live Captions for every accent/noise condition; process-loopback requires Windows 10 2004 or later; physical spoken-microphone accuracy still needs a human listening check before general release.
+
+Local Windows verification on 2026-09-14 used SDK 10.0.400 and fresh `LECTURE_COPILOT_DATA_ROOT` directories:
+
+- locked restore and Release solution build succeeded with 0 errors; the solution still reports its existing nullable-analysis warning backlog;
+- all **272** automated tests passed, including 16 focused local-ASR identity, continuous-speech, 30-minute-equivalent, queue, failure-cleanup and retry tests;
+- the official model WAV, synthetically presented at 48 kHz, produced 14 accepted revisions, one final and exactly one logical identity;
+- two official speech WAVs played through Windows process loopback produced 66 accepted revisions, two finals and exactly two logical identities, with 0 dropped frames and 0 capture/recognition errors;
+- first microphone open/start/stop succeeded at 16 kHz mono float with 0 dropped frames and 0 errors; no recognized text or audio was persisted;
+- the real WPF timeline smoke passed history-anchor preservation, bounded draft height, font/resize behavior and return-to-live;
+- the published application started from the exact path below, remained running, accepted a normal window close, left no recovery marker and left no app-owned process;
+- self-contained output: **422 files, 224,588,087 bytes** in `artifacts/local-asr-sherpa-v1-win-x64`;
+- entry executable SHA-256: `D5EBB91EB427CDB12DCB079659E94AB31FF362BE1130FF1D5B2F7F1BEAF18CFB`;
+- application assembly SHA-256: `A9F31A88ABF8B1AB2C40609423D5912BCB1A7796AF4A4AAF17D3D260D79577AC`.
+
+The Windows Live Captions fallback still compiled and its microphone toggle/rebind/cleanup smoke passed, but its generated system-audio sentence was not observed in that run. This is recorded as **not passed** rather than treated as proof of a regression: the same desktop initially routed test playback away from default-device loopback, while the independent process-loopback local-ASR check was deterministic. Re-run the fallback audio smoke in a normal playback session before any public release.
+
 ## Required toolchain
 
 - Windows 11

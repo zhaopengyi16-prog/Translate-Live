@@ -11,6 +11,13 @@ using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator.models
 {
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum CaptionSourceKind
+    {
+        WindowsLiveCaptions,
+        LocalSherpaOnnx
+    }
+
     public enum CredentialStorageIssue
     {
         None,
@@ -49,6 +56,8 @@ namespace LiveCaptionsTranslator.models
         private string apiName;
         private string targetLanguage;
         private string prompt;
+        private CaptionSourceKind captionSource;
+        private string localAsrModelDirectory;
         private string? ignoredUpdateVersion;
         
         private MainWindowState mainWindowState;
@@ -145,6 +154,36 @@ namespace LiveCaptionsTranslator.models
                 OnPropertyChanged("Prompt");
             }
         }
+        public CaptionSourceKind CaptionSource
+        {
+            get => captionSource;
+            set
+            {
+                if (captionSource == value)
+                    return;
+                captionSource = value;
+                OnPropertyChanged(nameof(CaptionSource));
+                OnPropertyChanged(nameof(CaptionSourceDisplayName));
+            }
+        }
+        public string LocalAsrModelDirectory
+        {
+            get => localAsrModelDirectory;
+            set
+            {
+                string normalized = value?.Trim() ?? string.Empty;
+                if (string.Equals(localAsrModelDirectory, normalized, StringComparison.Ordinal))
+                    return;
+                localAsrModelDirectory = normalized;
+                OnPropertyChanged(nameof(LocalAsrModelDirectory));
+            }
+        }
+        [JsonIgnore]
+        public string CaptionSourceDisplayName => CaptionSource switch
+        {
+            CaptionSourceKind.LocalSherpaOnnx => "本地 ASR · sherpa-onnx",
+            _ => "Windows Live Captions"
+        };
         public string? IgnoredUpdateVersion
         {
             get => ignoredUpdateVersion;
@@ -274,6 +313,8 @@ namespace LiveCaptionsTranslator.models
             apiName = "Google";
             targetLanguage = "zh-CN";
             prompt = DefaultTranslationPrompt;
+            captionSource = CaptionSourceKind.WindowsLiveCaptions;
+            localAsrModelDirectory = string.Empty;
 
             mainWindowState = new MainWindowState();
             overlayWindowState = new OverlayWindowState();

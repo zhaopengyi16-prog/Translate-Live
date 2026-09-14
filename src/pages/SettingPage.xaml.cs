@@ -11,7 +11,16 @@ namespace LiveCaptionsTranslator
 {
     public partial class SettingPage : Page
     {
+        private sealed record CaptionSourceOption(
+            CaptionSourceKind Kind,
+            string DisplayName);
+
         private static SettingWindow? SettingWindow;
+        private readonly CaptionSourceOption[] captionSourceOptions =
+        [
+            new(CaptionSourceKind.WindowsLiveCaptions, "Windows Live Captions"),
+            new(CaptionSourceKind.LocalSherpaOnnx, "本地 ASR · sherpa-onnx（实验）")
+        ];
 
         public SettingPage()
         {
@@ -26,8 +35,37 @@ namespace LiveCaptionsTranslator
 
             TranslateAPIBox.ItemsSource = Translator.Setting?.Configs.Keys;
             TranslateAPIBox.SelectedItem = Translator.Setting?.ApiName;
+            CaptionSourceBox.ItemsSource = captionSourceOptions;
+            CaptionSourceBox.SelectedItem = captionSourceOptions.First(option =>
+                option.Kind == (Translator.Setting?.CaptionSource ??
+                    CaptionSourceKind.WindowsLiveCaptions));
+            RefreshCaptionSourceControls();
 
             LoadAPISetting();
+        }
+
+        private void CaptionSourceBox_SelectionChanged(
+            object sender,
+            SelectionChangedEventArgs e)
+        {
+            if (CaptionSourceBox.SelectedItem is CaptionSourceOption option &&
+                Translator.Setting != null)
+            {
+                Translator.Setting.CaptionSource = option.Kind;
+            }
+            RefreshCaptionSourceControls();
+        }
+
+        private void RefreshCaptionSourceControls()
+        {
+            bool local = (CaptionSourceBox.SelectedItem as CaptionSourceOption)?.Kind ==
+                CaptionSourceKind.LocalSherpaOnnx;
+            LocalAsrSettingsPanel.Visibility = local
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            LiveCaptionsButton.Visibility = local
+                ? Visibility.Collapsed
+                : Visibility.Visible;
         }
 
         private async void LiveCaptionsButton_click(object sender, RoutedEventArgs e)

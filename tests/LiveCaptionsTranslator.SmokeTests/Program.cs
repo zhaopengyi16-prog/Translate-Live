@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -11,8 +12,12 @@ using System.Windows.Threading;
 using LiveCaptionsTranslator.controls;
 using LiveCaptionsTranslator.models;
 using LiveCaptionsTranslator.services;
+using LiveCaptionsTranslator.services.recognition;
 using LiveCaptionsTranslator.utils;
 using LiveCaptionsTranslator.viewmodels;
+
+using NAudio.Wave;
+using NAudio.CoreAudioApi;
 
 AutomationElement? liveCaptionsWindow = null;
 int? liveCaptionsProcessId = null;
@@ -25,6 +30,35 @@ bool exerciseSystemAudio = args.Contains(
 bool exerciseMultipleVoices = args.Contains(
     "--multi-voice-audio",
     StringComparer.OrdinalIgnoreCase);
+
+string? localAsrWavModelRoot = ReadOptionValue(args, "--local-asr-wav");
+if (localAsrWavModelRoot != null)
+{
+    string? wavPath = ReadOptionValue(args, "--wav");
+    bool simulate48Khz = args.Contains(
+        "--simulate-48k",
+        StringComparer.OrdinalIgnoreCase);
+    return await RunLocalAsrWavSmoke(
+        localAsrWavModelRoot,
+        wavPath,
+        simulate48Khz);
+}
+
+string? localAsrSystemModelRoot = ReadOptionValue(
+    args,
+    "--local-asr-system-audio");
+if (localAsrSystemModelRoot != null)
+{
+    return await RunLocalAsrSystemAudioSmoke(localAsrSystemModelRoot);
+}
+
+string? localAsrMicrophoneModelRoot = ReadOptionValue(
+    args,
+    "--local-asr-microphone");
+if (localAsrMicrophoneModelRoot != null)
+{
+    return await RunLocalAsrMicrophoneStartSmoke(localAsrMicrophoneModelRoot);
+}
 
 if (args.Contains("--inspect-existing", StringComparer.OrdinalIgnoreCase))
 {
@@ -175,6 +209,280 @@ finally
 
 Console.WriteLine($"CleanupConfirmed={exitCode != 3}");
 return exitCode;
+
+static string? ReadOptionValue(string[] arguments, string option)
+{
+    int index = Array.FindIndex(
+        arguments,
+        item => string.Equals(item, option, StringComparison.OrdinalIgnoreCase));
+    if (index < 0)
+        return null;
+    if (index + 1 >= arguments.Length ||
+        arguments[index + 1].StartsWith("--", StringComparison.Ordinal))
+    {
+        throw new ArgumentException($"{option} requires a value.");
+    }
+
+    return arguments[index + 1];
+}
+
+static async Task<int> RunLocalAsrWavSmoke(
+    string modelRoot,
+    string? wavPath,
+    bool simulate48Khz)
+{
+    try
+    {
+        LocalAsrModelFiles model = LocalAsrModelLocator.Resolve(modelRoot);
+        string validationWav = string.IsNullOrWhiteSpace(wavPath)
+            ? Path.Combine(model.ModelDirectory, "validation-wavs", "0.wav")
+            : Path.GetFullPath(wavPath);
+        if (!File.Exists(validationWav))
+            throw new FileNotFoundException("Local ASR validation WAV is missing.");
+
+        await using ILocalAsrRecognizer recognizer =
+            new SherpaLocalAsrRecognizer(model);
+        using var reader = new WaveFileReader(validationWav);
+        LocalAudioFormat format = LocalAudioSampleConverter.Describe(
+            reader.WaveFormat);
+        int chunkBytes = Math.Max(
+            format.BlockAlign,
+            format.SampleRate * format.BlockAlign / 10);
+        chunkBytes -= chunkBytes % format.BlockAlign;
+        var buffer = new byte[chunkBytes];
+        var session = new LocalRecognitionSession();
+        session.BeginSession(newSessionId: 1, newCaptureEpoch: 1);
+        var events = new List<RecognitionEvent>();
+
+        int read;
+        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            float[] samples = LocalAudioSampleConverter.ConvertToMonoFloat(
+                buffer.AsSpan(0, read),
+                format);
+            int sourceSampleRate = format.SampleRate;
+            if (simulate48Khz)
+            {
+                samples = samples
+                    .SelectMany(sample => new[] { sample, sample, sample })
+                    .ToArray();
+                sourceSampleRate *= 3;
+            }
+            foreach (LocalAsrHypothesis hypothesis in
+                     recognizer.Process(sourceSampleRate, samples))
+            {
+                RecognitionAcceptance accepted = session.Accept(
+                    new RecognitionUpdate(
+                        1,
+                        1,
+                        hypothesis.SourceRevision,
+                        DateTimeOffset.UtcNow,
+                        hypothesis.Text,
+                        hypothesis.IsFinal,
+                        hypothesis.EndpointReason));
+                if (accepted.IsAccepted)
+                    events.Add(accepted.Event!);
+            }
+        }
+
+        LocalAsrHypothesis? tail = recognizer.Flush();
+        if (tail != null)
+        {
+            RecognitionAcceptance accepted = session.Accept(
+                new RecognitionUpdate(
+                    1,
+                    1,
+                    tail.SourceRevision,
+                    DateTimeOffset.UtcNow,
+                    tail.Text,
+                    tail.IsFinal,
+                    tail.EndpointReason));
+            if (accepted.IsAccepted)
+                events.Add(accepted.Event!);
+        }
+
+        RecognitionAcceptance stop = session.Stop(finalizeUnfinished: true);
+        if (stop.IsAccepted)
+            events.Add(stop.Event!);
+
+        int finalCount = events.Count(item => item.IsFinal);
+        int identityCount = events
+            .Select(item => item.SegmentId)
+            .Distinct()
+            .Count();
+        Console.WriteLine("LocalAsrModelLoaded=True");
+        Console.WriteLine($"LocalAsrWavEvents={events.Count}");
+        Console.WriteLine($"LocalAsrWavFinals={finalCount}");
+        Console.WriteLine($"LocalAsrWavIdentities={identityCount}");
+        Console.WriteLine($"LocalAsrWavSimulated48Khz={simulate48Khz}");
+        Console.WriteLine($"LocalAsrWavDroppedFrames=0");
+        return finalCount > 0 && identityCount > 0 ? 0 : 21;
+    }
+    catch (Exception exception)
+    {
+        Console.WriteLine($"LocalAsrWavFailure={exception.GetType().Name}");
+        return 20;
+    }
+}
+
+static async Task<int> RunLocalAsrSystemAudioSmoke(string modelRoot)
+{
+    string stage = "initialize";
+    try
+    {
+        stage = "resolve-validation-audio";
+        LocalAsrModelFiles model = LocalAsrModelLocator.Resolve(modelRoot);
+        string[] validationWavs =
+        [
+            Path.Combine(model.ModelDirectory, "validation-wavs", "0.wav"),
+            Path.Combine(model.ModelDirectory, "validation-wavs", "1.wav")
+        ];
+        if (validationWavs.Any(path => !File.Exists(path)))
+            throw new FileNotFoundException("Local ASR validation audio is missing.");
+
+        stage = "start-capture";
+        var events = new List<RecognitionEvent>();
+        var errors = new List<LocalAsrError>();
+        await using var service = new LocalAsrCaptureService(
+            new WasapiLocalAudioCaptureFactory(
+                includeCurrentProcessAudio: true),
+            new SherpaLocalAsrRecognizerFactory());
+        await service.StartAsync(
+            sessionId: 2,
+            captureEpoch: 2,
+            LocalAsrAudioSource.SystemAudio,
+            modelRoot,
+            item =>
+            {
+                lock (events)
+                    events.Add(item);
+            },
+            error =>
+            {
+                lock (errors)
+                    errors.Add(error);
+            });
+        LocalAudioFormat? captureFormat = service.ActiveFormat;
+
+        using MMDevice renderDevice =
+            WasapiLoopbackCapture.GetDefaultLoopbackCaptureDevice();
+        for (int index = 0; index < validationWavs.Length; index++)
+        {
+            stage = $"play-validation-audio-{index + 1}";
+            await PlayWaveOnDeviceAsync(validationWavs[index], renderDevice);
+            await Task.Delay(TimeSpan.FromMilliseconds(1600));
+        }
+
+        await Task.Delay(TimeSpan.FromMilliseconds(2600));
+        stage = "stop-capture";
+        await service.StopAsync(finalizeUnfinished: true);
+
+        RecognitionEvent[] snapshot;
+        LocalAsrError[] errorSnapshot;
+        lock (events)
+            snapshot = events.ToArray();
+        lock (errors)
+            errorSnapshot = errors.ToArray();
+        int finalCount = snapshot.Count(item => item.IsFinal);
+        int identityCount = snapshot
+            .Where(item => item.IsFinal)
+            .Select(item => item.SegmentId)
+            .Distinct()
+            .Count();
+        bool fatalError = errorSnapshot.Any(error => error.Code is
+            "recognition-worker-failed" or "audio-capture-stopped");
+        Console.WriteLine($"LocalAsrSystemAudioFiles={validationWavs.Length}");
+        Console.WriteLine(
+            $"LocalAsrSystemFormat={captureFormat?.SampleRate}/" +
+            $"{captureFormat?.Channels}/{captureFormat?.BitsPerSample}/" +
+            $"{captureFormat?.Encoding}");
+        Console.WriteLine($"LocalAsrSystemEvents={snapshot.Length}");
+        Console.WriteLine($"LocalAsrSystemFinals={finalCount}");
+        Console.WriteLine($"LocalAsrSystemIdentities={identityCount}");
+        Console.WriteLine($"LocalAsrSystemDroppedFrames={service.DroppedFrames}");
+        Console.WriteLine($"LocalAsrSystemProcessedSamples={service.ProcessedSamples}");
+        Console.WriteLine($"LocalAsrSystemNonSilentSamples={service.NonSilentSamples}");
+        Console.WriteLine($"LocalAsrSystemPeakLevel={service.PeakLevel:F6}");
+        Console.WriteLine($"LocalAsrSystemErrors={errorSnapshot.Length}");
+        return finalCount >= 1 && identityCount >= 1 && !fatalError ? 0 : 23;
+    }
+    catch (Exception exception)
+    {
+        Console.WriteLine($"LocalAsrSystemFailureStage={stage}");
+        Console.WriteLine($"LocalAsrSystemFailure={exception.GetType().Name}");
+        return 22;
+    }
+}
+
+static async Task PlayWaveOnDeviceAsync(string path, MMDevice renderDevice)
+{
+    using var reader = new WaveFileReader(path);
+    using var output = new WasapiOut(
+        renderDevice,
+        AudioClientShareMode.Shared,
+        useEventSync: false,
+        latency: 100);
+    var stopped = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    output.PlaybackStopped += (_, args) =>
+    {
+        if (args.Exception == null)
+            stopped.TrySetResult();
+        else
+            stopped.TrySetException(args.Exception);
+    };
+    output.Init(reader);
+    output.Play();
+    await stopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+}
+
+static async Task<int> RunLocalAsrMicrophoneStartSmoke(string modelRoot)
+{
+    string stage = "initialize";
+    try
+    {
+        var errors = new List<LocalAsrError>();
+        await using var service = new LocalAsrCaptureService();
+        stage = "start-capture";
+        await service.StartAsync(
+            sessionId: 3,
+            captureEpoch: 3,
+            LocalAsrAudioSource.Microphone,
+            modelRoot,
+            _ => { },
+            error =>
+            {
+                lock (errors)
+                    errors.Add(error);
+            });
+        LocalAudioFormat? format = service.ActiveFormat;
+        stage = "observe-capture";
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        stage = "stop-capture";
+        await service.StopAsync(finalizeUnfinished: false);
+
+        LocalAsrError[] snapshot;
+        lock (errors)
+            snapshot = errors.ToArray();
+        bool fatalError = snapshot.Any(error => error.Code is
+            "recognition-worker-failed" or "audio-capture-stopped");
+        Console.WriteLine("LocalAsrMicrophoneStarted=True");
+        Console.WriteLine(
+            $"LocalAsrMicrophoneFormat={format?.SampleRate}/" +
+            $"{format?.Channels}/{format?.BitsPerSample}/{format?.Encoding}");
+        Console.WriteLine($"LocalAsrMicrophoneProcessedSamples={service.ProcessedSamples}");
+        Console.WriteLine($"LocalAsrMicrophoneDroppedFrames={service.DroppedFrames}");
+        Console.WriteLine($"LocalAsrMicrophoneErrors={snapshot.Length}");
+        return !fatalError && service.ProcessedSamples > 0 ? 0 : 25;
+    }
+    catch (Exception exception)
+    {
+        Console.WriteLine($"LocalAsrMicrophoneFailureStage={stage}");
+        Console.WriteLine($"LocalAsrMicrophoneFailure={exception.GetType().Name}");
+        Console.WriteLine($"LocalAsrMicrophoneFailureHResult=0x{exception.HResult:X8}");
+        return 24;
+    }
+}
 
 static bool ExerciseSystemAudio(
     AutomationElement liveCaptionsWindow,

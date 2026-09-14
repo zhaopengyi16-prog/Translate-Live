@@ -23,6 +23,7 @@ Translate Live turns Windows Live Captions into a classroom-oriented bilingual w
 - generates a class summary with an independently configured model;
 - offers a resizable, always-on-top subtitle overlay;
 - stores provider credentials with Windows DPAPI instead of plain-text settings.
+- offers an experimental, fully local English ASR source while retaining Windows Live Captions as the default fallback.
 
 ## Translation engines
 
@@ -47,6 +48,8 @@ The summary model is configured separately so long-running summary requests do n
 - Internet access for cloud translation providers. Ollama, MTranServer, and LibreTranslate may be self-hosted.
 - .NET SDK 10.0.400 to build from source. The SDK is pinned by `global.json`.
 
+The optional local-ASR experiment requires Windows 10 version 2004 or later for process-loopback system audio. Its bundled 20M Zipformer model recognizes English only.
+
 ## Build from source
 
 ~~~powershell
@@ -58,6 +61,13 @@ cd Translate-Live
 ./scripts/publish-dev.ps1
 ~~~
 
+To build the separate local-ASR experiment, fetch the verified model and pass its directory to the publish script:
+
+~~~powershell
+$model = ./scripts/fetch-local-asr-model.ps1
+./scripts/publish-dev.ps1 -LocalAsrModelRoot $model -OutputDirectory artifacts/local-asr-sherpa-v1-win-x64
+~~~
+
 The self-contained Windows x64 build is written to:
 
 `artifacts/dev-win-x64/LectureCopilot.Dev.exe`
@@ -66,7 +76,7 @@ The internal executable and data-directory names remain `LectureCopilot.Dev` for
 
 ## First run
 
-1. Enable Windows Live Captions once and install the required recognition language.
+1. Keep the default Windows Live Captions source, or select the experimental local English ASR source in **Settings**.
 2. Start Translate Live.
 3. Open **Settings** and select the translation engine and target language.
 4. Choose **Online class · computer audio** or **In-person class · microphone**.
@@ -88,16 +98,16 @@ Translate Live does not bundle provider credentials or classroom content. Runtim
 | Diagnostics | `Logs/app-*.jsonl` | Event names, exception types, HRESULTs, and durations only |
 | Backups and recovery state | `Backups/`, `Recovery/` | Local application data |
 
-Audio-to-text is performed by Windows Live Captions. Recognized text is sent only to the translation or summary provider selected by the user. Do not attach settings, credential files, databases, or logs containing sensitive context to public issues.
+Audio-to-text is performed by the selected source: Windows Live Captions or the optional local sherpa-onnx model. The local model processes audio in memory and does not save recordings. Recognized text is sent only to the translation or summary provider selected by the user. Do not attach settings, credential files, databases, or logs containing sensitive context to public issues.
 
 ## Architecture
 
 ~~~text
 Windows audio / microphone
         |
-Windows Live Captions
+        +--> Windows Live Captions --> UI Automation capture
         |
-UI Automation capture
+        +--> local WASAPI --> sherpa-onnx streaming ASR (optional)
         |
 Caption stabilization and revision policy
         |
@@ -126,13 +136,14 @@ See [docs/PROJECT.md](docs/PROJECT.md) for component boundaries and storage rule
 - Windows Live Captions UI Automation can change across Windows versions.
 - Public binaries are not yet code-signed and may trigger Microsoft Defender SmartScreen.
 - The current open-source baseline targets Windows x64 verification; ARM64 is configured but requires independent release validation.
+- The experimental local model is English-only and its accuracy depends on speaker, accent, noise, and microphone quality; Windows Live Captions remains selectable at any time for the next class.
 
 ## Roadmap
 
 - signed installer and reproducible GitHub Release;
 - signed, reproducible Windows release artifacts;
 - first-run diagnostics and clearer provider health reporting;
-- optional pluggable ASR source while retaining Windows Live Captions as a fallback.
+- evaluate additional multilingual local-ASR models while retaining Windows Live Captions as a fallback.
 
 ## Contributing
 

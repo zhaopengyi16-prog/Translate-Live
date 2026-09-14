@@ -36,7 +36,7 @@
             <TextBlock
                 Margin="0,7,0,24"
                 Style="{StaticResource LectureMutedTextStyle}"
-                Text="连接 Windows 实时字幕、选择翻译引擎，并调整实时显示行为。" />
+                Text="选择字幕识别源、翻译引擎，并调整实时显示行为。" />
 
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -48,7 +48,7 @@
                 <Border Grid.Column="0" Style="{StaticResource SettingGroupStyle}">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="Windows 实时字幕" />
+                            <TextBlock Style="{StaticResource LectureSectionTitleStyle}" Text="字幕识别源" />
                             <Button
                                 x:Name="LiveCaptionsInfo"
                                 Margin="6,-2,0,0"
@@ -58,14 +58,21 @@
                                 <ui:SymbolIcon Symbol="Info16" />
                             </Button>
                             <ui:Flyout x:Name="LiveCaptionsInfoFlyout">
-                                <TextBlock Width="310" Text="Windows 11 24H2 之后，源语言需要在系统实时字幕中修改。请使用此处的显示/隐藏，不要直接结束系统字幕。" TextWrapping="Wrap" />
+                                <TextBlock Width="330" Text="Windows Live Captions 保持原有兼容路径；本地 ASR 实验直接处理音频，避免滚动窗口回放造成重复。字幕源在下一次开始课堂时生效。" TextWrapping="Wrap" />
                             </ui:Flyout>
                         </StackPanel>
                         <TextBlock
                             Margin="0,8,0,18"
                             Style="{StaticResource LectureMutedTextStyle}"
-                            Text="需要调整系统字幕的源语言或检查连接时，可暂时显示原窗口。"
+                            Text="同一课堂只启用一个识别源。本地 ASR 当前使用英文小型流式模型，模型文件不会保存进设置备份。"
                             TextWrapping="Wrap" />
+                        <ComboBox
+                            x:Name="CaptionSourceBox"
+                            Height="36"
+                            Margin="0,0,0,12"
+                            Padding="8,4"
+                            DisplayMemberPath="DisplayName"
+                            SelectionChanged="CaptionSourceBox_SelectionChanged" />
                         <Button
                             x:Name="LiveCaptionsButton"
                             Width="138"
@@ -74,6 +81,22 @@
                             Style="{StaticResource LectureButtonStyle}">
                             <TextBlock x:Name="ButtonText" Text="显示系统字幕" />
                         </Button>
+                        <StackPanel x:Name="LocalAsrSettingsPanel" Visibility="Collapsed">
+                            <TextBlock
+                                Margin="0,0,0,6"
+                                Style="{StaticResource LectureMutedTextStyle}"
+                                Text="本地模型目录（留空时使用程序 Models 目录）" />
+                            <TextBox
+                                Height="36"
+                                Padding="8,5"
+                                Text="{Binding LocalAsrModelDirectory, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                ToolTip="应包含 encoder、decoder、joiner 与 tokens.txt" />
+                            <TextBlock
+                                Margin="0,8,0,0"
+                                Style="{StaticResource LectureMutedTextStyle}"
+                                Text="实验模型只识别英文；识别完全在本机运行。"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 

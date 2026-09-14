@@ -52,6 +52,8 @@ namespace LiveCaptionsTranslator.Tests
                 setting.Appearance.UiFontFamily = "Segoe UI";
                 setting.Appearance.SubtitleFontSize = 24;
                 setting.Appearance.ReduceMotion = true;
+                setting.CaptionSource = CaptionSourceKind.LocalSherpaOnnx;
+                setting.LocalAsrModelDirectory = @"D:\Models\sherpa";
                 setting.Save(path, TestProtector);
 
                 var loaded = Setting.Load(path, TestProtector);
@@ -64,6 +66,8 @@ namespace LiveCaptionsTranslator.Tests
                 Assert.AreEqual("Segoe UI", loaded.Appearance.UiFontFamily);
                 Assert.AreEqual(24, loaded.Appearance.SubtitleFontSize);
                 Assert.IsTrue(loaded.Appearance.ReduceMotion);
+                Assert.AreEqual(CaptionSourceKind.LocalSherpaOnnx, loaded.CaptionSource);
+                Assert.AreEqual(@"D:\Models\sherpa", loaded.LocalAsrModelDirectory);
             }
             finally
             {

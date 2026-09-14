@@ -6,6 +6,7 @@ using System.Windows.Automation;
 using LiveCaptionsTranslator.apis;
 using LiveCaptionsTranslator.models;
 using LiveCaptionsTranslator.services;
+using LiveCaptionsTranslator.services.recognition;
 using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator
@@ -27,6 +28,7 @@ namespace LiveCaptionsTranslator
             new(acceptedResultHandler: OnAcceptedTranslation, resultValidator: CanAcceptTranslation);
         private static readonly LiveCaptionIdentityResolver captionIdentityResolver = new(splitLongDrafts: false);
         private static readonly CaptionRecordingPolicy recordingPolicy = new();
+        private static readonly LocalAsrCaptureService localAsrCaptureService = new();
         private static readonly object captureStateLock = new();
         private static readonly object translationIngressLock = new();
         private static readonly Stopwatch observationClock = Stopwatch.StartNew();
@@ -38,6 +40,11 @@ namespace LiveCaptionsTranslator
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<
             (long Epoch, Guid Id, int Revision, string Api, string Language), TranslationQueueResult>
             provisionalTranslations = new();
+        private static readonly Dictionary<Guid, (int Revision, bool IsFinal)>
+            localRecognitionRevisions = [];
+        private static Guid? lastLocalDraftQueuedId;
+        private static int lastLocalDraftQueuedBytes;
+        private static TimeSpan lastLocalDraftQueuedAt;
         public static long CaptureEpoch => Interlocked.Read(ref captureEpoch);
         private static readonly LiveCaptionsConnectionPolicy liveCaptionsConnectionPolicy = new();
         private static readonly SemaphoreSlim liveCaptionsConnectionGate = new(1, 1);
@@ -45,6 +52,7 @@ namespace LiveCaptionsTranslator
             CreatePersistedSegmentAsync,
             UpdatePersistedSegmentAsync);
         private static bool captureSuspended;
+        private static CaptionSourceKind activeCaptionSource;
         private static long capturePreparationSequence;
         private static long activeCapturePreparationId;
         private static AutomationElement? preparedCaptureWindow;
@@ -61,6 +69,14 @@ namespace LiveCaptionsTranslator
         }
         public static Caption? Caption => caption;
         public static Setting? Setting => setting;
+        public static CaptionSourceKind ActiveCaptionSource
+        {
+            get
+            {
+                lock (captureStateLock)
+                    return activeCaptionSource;
+            }
+        }
 
         private static bool logOnlyFlag;
         public static bool LogOnlyFlag
@@ -82,6 +98,7 @@ namespace LiveCaptionsTranslator
         public static event Action<TranscriptSegment>? TranscriptSegmentChanged;
         public static event Action<TranscriptSegment?>? TranscriptDraftChanged;
         public static event Action<bool>? LiveCaptionsConnectionChanged;
+        public static event Action<string>? LocalAsrStatusChanged;
 
         static Translator()
         {
@@ -90,6 +107,7 @@ namespace LiveCaptionsTranslator
 
             caption = Caption.GetInstance();
             setting = Setting.Load();
+            activeCaptionSource = setting.CaptionSource;
         }
 
         public static async Task<bool> ConnectLiveCaptionsAsync(
@@ -204,7 +222,9 @@ namespace LiveCaptionsTranslator
 
             while (!token.IsCancellationRequested)
             {
-                if (Volatile.Read(ref captureSuspended) || Window == null)
+                if (Volatile.Read(ref captureSuspended) ||
+                    ActiveCaptionSource != CaptionSourceKind.WindowsLiveCaptions ||
+                    Window == null)
                 {
                     if (token.WaitHandle.WaitOne(100))
                         return;
@@ -350,6 +370,94 @@ namespace LiveCaptionsTranslator
                 pendingTextQueue.Enqueue(new CaptionTranslationSubmission(identity, segment.Text, sessionId));
         }
 
+        internal static bool AcceptLocalRecognitionEvent(RecognitionEvent recognitionEvent)
+        {
+            lock (captureStateLock)
+            {
+                if (Volatile.Read(ref captureSuspended) ||
+                    activeCaptionSource != CaptionSourceKind.LocalSherpaOnnx ||
+                    recognitionEvent.CaptureEpoch != CaptureEpoch ||
+                    recognitionEvent.SessionId != LectureSessionTracker.CurrentSessionId ||
+                    string.IsNullOrWhiteSpace(recognitionEvent.Text))
+                {
+                    return false;
+                }
+
+                if (localRecognitionRevisions.TryGetValue(
+                        recognitionEvent.SegmentId,
+                        out var existing) &&
+                    recognitionEvent.Revision <= existing.Revision)
+                {
+                    return false;
+                }
+
+                localRecognitionRevisions[recognitionEvent.SegmentId] =
+                    (recognitionEvent.Revision, recognitionEvent.IsFinal);
+                var segment = new LiveCaptionSegment(
+                    recognitionEvent.SegmentId,
+                    recognitionEvent.Sequence,
+                    recognitionEvent.Revision,
+                    recognitionEvent.Text,
+                    recognitionEvent.IsFinal,
+                    recognitionEvent.CapturedAt);
+                TranslationTaskIdentity identity = ToIdentity(
+                    segment,
+                    recognitionEvent.CaptureEpoch,
+                    recognitionEvent.IsFinal,
+                    recognitionEvent.EndpointReason ==
+                        RecognitionEndpointReason.SessionStopped);
+
+                Caption.BeginCurrentSegment(identity);
+                Caption.OriginalCaption = segment.Text;
+                Caption.OverlayOriginalCaption = TextUtil.ShortenDisplaySentence(
+                    segment.Text,
+                    TextUtil.VERYLONG_THRESHOLD);
+                Caption.DisplayOriginalCaption = TextUtil.ShortenDisplaySentence(
+                    segment.Text,
+                    TextUtil.VERYLONG_THRESHOLD);
+
+                if (recognitionEvent.IsFinal)
+                {
+                    PublishRecordedCaption(
+                        new RecordedCaption(
+                            segment,
+                            recognitionEvent.EndpointReason ==
+                                RecognitionEndpointReason.SessionStopped),
+                        recognitionEvent.SessionId,
+                        recognitionEvent.CaptureEpoch);
+                    lastLocalDraftQueuedId = null;
+                    lastLocalDraftQueuedBytes = 0;
+                    return true;
+                }
+
+                TranscriptDraftChanged?.Invoke(ToTranscriptSegment(
+                    segment,
+                    null,
+                    SegmentState.Draft,
+                    recognitionEvent.SessionId,
+                    recognitionEvent.CaptureEpoch));
+
+                int byteCount = Encoding.UTF8.GetByteCount(segment.Text);
+                TimeSpan now = observationClock.Elapsed;
+                bool newSegment = lastLocalDraftQueuedId != segment.Id;
+                bool substantialGrowth = byteCount - lastLocalDraftQueuedBytes >= 24;
+                bool quietRefresh = now - lastLocalDraftQueuedAt >= TimeSpan.FromMilliseconds(900);
+                if (!LogOnlyFlag &&
+                    byteCount >= TextUtil.SHORT_THRESHOLD &&
+                    (newSegment || substantialGrowth || quietRefresh))
+                {
+                    pendingTextQueue.Enqueue(new CaptionTranslationSubmission(
+                        identity,
+                        segment.Text,
+                        recognitionEvent.SessionId));
+                    lastLocalDraftQueuedId = segment.Id;
+                    lastLocalDraftQueuedBytes = byteCount;
+                    lastLocalDraftQueuedAt = now;
+                }
+                return true;
+            }
+        }
+
         private static async Task PersistRecordedSourceAsync(
             Task previous, string text, string translatedText, string apiName, string targetLanguage,
             long sessionId, TranslationTaskIdentity identity)
@@ -367,7 +475,8 @@ namespace LiveCaptionsTranslator
 
         public static async Task TranslateLoop(CancellationToken token = default)
         {
-            await ConnectLiveCaptionsAsync(userInitiated: false, token);
+            if (Setting.CaptionSource == CaptionSourceKind.WindowsLiveCaptions)
+                await ConnectLiveCaptionsAsync(userInitiated: false, token);
 
             while (!token.IsCancellationRequested)
             {
@@ -645,9 +754,20 @@ namespace LiveCaptionsTranslator
                 return true;
             lock (captureStateLock)
             {
-                return result.Identity.CaptureEpoch == CaptureEpoch &&
-                       result.SessionId == LectureSessionTracker.CurrentSessionId &&
-                       recordingPolicy.IsCurrentRevision(result.Identity);
+                if (result.Identity.CaptureEpoch != CaptureEpoch ||
+                    result.SessionId != LectureSessionTracker.CurrentSessionId)
+                {
+                    return false;
+                }
+                if (activeCaptionSource == CaptionSourceKind.LocalSherpaOnnx)
+                {
+                    return localRecognitionRevisions.TryGetValue(
+                               result.Identity.SegmentId,
+                               out var local) &&
+                           local.Revision == result.Identity.Revision &&
+                           local.IsFinal == result.Identity.IsFinal;
+                }
+                return recordingPolicy.IsCurrentRevision(result.Identity);
             }
         }
 
@@ -852,6 +972,14 @@ namespace LiveCaptionsTranslator
 
         public static async Task StopCaptureAndFlushAsync(CancellationToken token = default)
         {
+            if (ActiveCaptionSource == CaptionSourceKind.LocalSherpaOnnx &&
+                localAsrCaptureService.IsRunning)
+            {
+                await localAsrCaptureService.StopAsync(
+                    finalizeUnfinished: true,
+                    token).ConfigureAwait(false);
+            }
+
             Task sourcePersistence;
             lock (translationIngressLock)
             lock (captureStateLock)
@@ -879,6 +1007,7 @@ namespace LiveCaptionsTranslator
                 captionIdentityResolver.Reset();
                 recordingPolicy.Reset();
                 provisionalTranslations.Clear();
+                ResetLocalRecognitionState();
             }
             await segmentPersistence.ClearAsync(token).ConfigureAwait(false);
             ClearCapturePresentation();
@@ -913,6 +1042,7 @@ namespace LiveCaptionsTranslator
                 }
 
                 epoch = Interlocked.Increment(ref captureEpoch);
+                activeCaptionSource = CaptionSourceKind.WindowsLiveCaptions;
                 captionIdentityResolver.StartFromCurrentSnapshot(
                     baselineSnapshot,
                     observationOrigin + observationClock.Elapsed);
@@ -925,6 +1055,105 @@ namespace LiveCaptionsTranslator
 
             ClearCapturePresentation();
             return new PreparedCaptureSession(epoch, preparationId);
+        }
+
+        internal static async Task<long> PrepareLocalCaptureEpochAsync(
+            CancellationToken token = default)
+        {
+            await segmentPersistence.ClearAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+
+            long epoch;
+            lock (translationIngressLock)
+            lock (captureStateLock)
+            {
+                if (!Volatile.Read(ref captureSuspended))
+                {
+                    throw new InvalidOperationException(
+                        "Capture must be suspended before preparing local ASR.");
+                }
+
+                epoch = Interlocked.Increment(ref captureEpoch);
+                activeCaptionSource = CaptionSourceKind.LocalSherpaOnnx;
+                captionIdentityResolver.Reset();
+                recordingPolicy.Reset();
+                provisionalTranslations.Clear();
+                ResetLocalRecognitionState();
+                activeCapturePreparationId = 0;
+                preparedCaptureWindow = null;
+            }
+
+            ClearCapturePresentation();
+            return epoch;
+        }
+
+        internal static bool ResumeLocalCapture(long epoch, long sessionId)
+        {
+            lock (captureStateLock)
+            {
+                if (!Volatile.Read(ref captureSuspended) ||
+                    activeCaptionSource != CaptionSourceKind.LocalSherpaOnnx ||
+                    epoch != CaptureEpoch ||
+                    sessionId != LectureSessionTracker.CurrentSessionId)
+                {
+                    return false;
+                }
+
+                Volatile.Write(ref captureSuspended, false);
+                return true;
+            }
+        }
+
+        internal static async Task StartLocalAsrAsync(
+            long epoch,
+            long sessionId,
+            bool microphoneMode,
+            string? configuredModelRoot,
+            CancellationToken token = default)
+        {
+            if (!ResumeLocalCapture(epoch, sessionId))
+            {
+                throw new InvalidOperationException(
+                    "The local ASR capture boundary is no longer current.");
+            }
+
+            try
+            {
+                await localAsrCaptureService.StartAsync(
+                    sessionId,
+                    epoch,
+                    microphoneMode
+                        ? LocalAsrAudioSource.Microphone
+                        : LocalAsrAudioSource.SystemAudio,
+                    configuredModelRoot,
+                    recognitionEvent => AcceptLocalRecognitionEvent(recognitionEvent),
+                    error =>
+                    {
+                        ProductDiagnostics.Write(
+                            $"local-asr.{error.Code}");
+                        LocalAsrStatusChanged?.Invoke(error.Code);
+                    },
+                    token).ConfigureAwait(false);
+                LocalAsrStatusChanged?.Invoke("running");
+            }
+            catch
+            {
+                SuspendLocalCapture(epoch);
+                LocalAsrStatusChanged?.Invoke("startup-failed");
+                throw;
+            }
+        }
+
+        internal static void SuspendLocalCapture(long epoch)
+        {
+            lock (captureStateLock)
+            {
+                if (activeCaptionSource == CaptionSourceKind.LocalSherpaOnnx &&
+                    epoch == CaptureEpoch)
+                {
+                    Volatile.Write(ref captureSuspended, true);
+                }
+            }
         }
 
         internal static bool ResumePreparedCapture(
@@ -946,6 +1175,7 @@ namespace LiveCaptionsTranslator
 
                 activeCapturePreparationId = 0;
                 preparedCaptureWindow = null;
+                activeCaptionSource = CaptionSourceKind.WindowsLiveCaptions;
                 Volatile.Write(ref captureSuspended, false);
                 return true;
             }
@@ -977,6 +1207,7 @@ namespace LiveCaptionsTranslator
                 // on screen from a previous class or a rebuilt source window.
                 captionIdentityResolver.Reset();
                 recordingPolicy.Reset();
+                activeCaptionSource = CaptionSourceKind.WindowsLiveCaptions;
                 activeCapturePreparationId = 0;
                 preparedCaptureWindow = null;
                 Volatile.Write(ref captureSuspended, false);
@@ -997,6 +1228,14 @@ namespace LiveCaptionsTranslator
             Caption.OverlayOriginalCaption = " ";
             Caption.OverlayNoticePrefix = " ";
             Caption.OverlayCurrentTranslation = " ";
+        }
+
+        private static void ResetLocalRecognitionState()
+        {
+            localRecognitionRevisions.Clear();
+            lastLocalDraftQueuedId = null;
+            lastLocalDraftQueuedBytes = 0;
+            lastLocalDraftQueuedAt = TimeSpan.Zero;
         }
 
         private static Task<TranslationHistoryEntry> CreatePersistedSegmentAsync(

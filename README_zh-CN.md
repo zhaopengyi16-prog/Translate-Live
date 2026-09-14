@@ -23,6 +23,7 @@ Translate Live 将 Windows 实时字幕扩展成面向课堂的双语工作台�
 - 使用独立模型生成、复制并保存课堂总结；
 - 提供可缩放、可置顶、可穿透的悬浮字幕；
 - 使用 Windows DPAPI 保存服务商凭据，不把密钥写回普通设置文件。
+- 可选用实验性的纯本地英文 ASR，同时保留 Windows 实时字幕作为默认回退。
 
 ## 支持的翻译引擎
 
@@ -47,6 +48,8 @@ Translate Live 将 Windows 实时字幕扩展成面向课堂的双语工作台�
 - 云端翻译服务需要网络；Ollama、MTranServer 与 LibreTranslate 可自行部署。
 - 从源码构建需要 .NET SDK 10.0.400，版本由 `global.json` 固定。
 
+实验性本地 ASR 的系统声音捕捉需要 Windows 10 2004 或更高版本；当前 20M Zipformer 模型只识别英文。
+
 ## 从源码构建
 
 ~~~powershell
@@ -58,6 +61,13 @@ cd Translate-Live
 ./scripts/publish-dev.ps1
 ~~~
 
+生成独立的本地 ASR 实验版：
+
+~~~powershell
+$model = ./scripts/fetch-local-asr-model.ps1
+./scripts/publish-dev.ps1 -LocalAsrModelRoot $model -OutputDirectory artifacts/local-asr-sherpa-v1-win-x64
+~~~
+
 自包含 Windows x64 产物位于：
 
 `artifacts/dev-win-x64/LectureCopilot.Dev.exe`
@@ -66,7 +76,7 @@ cd Translate-Live
 
 ## 第一次使用
 
-1. 首先开启一次 Windows 实时字幕，安装所需识别语言。
+1. 保持默认的 Windows 实时字幕，或在“设置”中选择实验性的本地英文 ASR。
 2. 启动 Translate Live。
 3. 在“设置”中选择翻译引擎和目标语言。
 4. 选择“在线课程 · 电脑声音”或“线下课堂 · 麦克风”。
@@ -88,16 +98,16 @@ cd Translate-Live
 | 诊断日志 | `Logs/app-*.jsonl` | 仅事件名、异常类型、HRESULT 和耗时 |
 | 备份与恢复状态 | `Backups/`、`Recovery/` | 本地应用数据 |
 
-声音转文字由 Windows 实时字幕处理。识别后的文字只发送给用户选择的翻译或总结服务商。提交公开 Issue 时，请勿附带真实密钥、设置文件、课堂数据库或包含敏感上下文的日志。
+声音转文字由用户选择的 Windows 实时字幕或本地 sherpa-onnx 模型处理。本地模型只在内存中处理音频，不保存录音。识别后的文字只发送给用户选择的翻译或总结服务商。提交公开 Issue 时，请勿附带真实密钥、设置文件、课堂数据库或包含敏感上下文的日志。
 
 ## 工作原理
 
 ~~~text
 电脑声音 / 麦克风
         |
-Windows 实时字幕
+        +--> Windows 实时字幕 --> UI Automation 字幕捕捉
         |
-UI Automation 字幕捕捉
+        +--> 本地 WASAPI --> sherpa-onnx 流式 ASR（可选）
         |
 字幕稳定化与修订判定
         |
@@ -126,13 +136,14 @@ SQLite 课堂会话与回顾
 - Windows 更新可能改变 Live Captions 的 UI Automation 结构。
 - 当前公开构建尚未进行代码签名，可能触发 Microsoft Defender SmartScreen。
 - 当前公开基线主要验证 Windows x64；ARM64 已配置，但需要独立发布验收。
+- 实验性本地模型只识别英文，准确率仍受口音、噪声、说话人和麦克风质量影响；下一次课堂可随时切回 Windows 实时字幕。
 
 ## 路线图
 
 - 可重复的 GitHub Release、代码签名和安装程序；
 - 可复现并签名的 Windows 发布产物；
 - 完善首次使用诊断和服务商健康状态；
-- 评估可插拔独立 ASR，并保留 Windows 实时字幕作为回退。
+- 继续评估多语言本地 ASR，同时保留 Windows 实时字幕作为回退。
 
 ## 参与贡献
 

@@ -58,6 +58,60 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
+        public async Task PreEnableBaselinePreservesTheFirstMicrophoneSentenceExactlyOnce()
+        {
+            await using Replay replay = await Replay.CreateAsync();
+            const string oldWindow = "Text left visible before this classroom.";
+            const string firstSentence = "The first microphone sentence is captured.";
+            const string secondSentence = "The second microphone sentence follows normally.";
+            replay.StartFromCurrentSnapshot(oldWindow, 0);
+
+            LiveCaptionUpdate first = await replay.ObserveAsync(
+                $"{oldWindow} {firstSentence}",
+                100);
+            Assert.AreEqual(firstSentence, replay.ViewModel.LiveText);
+            Assert.IsNotNull(first.CurrentSegment);
+            Guid firstId = first.CurrentSegment.Id;
+            Assert.IsEmpty(replay.ViewModel.Segments);
+            Assert.IsEmpty(await replay.RowsAsync());
+
+            await replay.ObserveAsync($"{oldWindow} {firstSentence}", 900);
+            await replay.ObserveAsync($"{oldWindow} {firstSentence}", 5000);
+
+            Assert.HasCount(1, replay.Recorded);
+            Assert.AreEqual(firstId, replay.Recorded[0].Segment.Id);
+            Assert.AreEqual(firstSentence, replay.Recorded[0].Segment.Text);
+            Assert.HasCount(1, replay.ViewModel.Segments);
+            Assert.AreEqual(firstSentence, replay.ViewModel.Segments[0].SourceText);
+            Assert.HasCount(1, await replay.RowsAsync());
+            Assert.AreEqual(firstSentence, (await replay.RowsAsync())[0].SourceText);
+
+            LiveCaptionUpdate second = await replay.ObserveAsync(
+                $"{oldWindow} {firstSentence} {secondSentence}",
+                5100);
+            Assert.AreEqual(secondSentence, replay.ViewModel.LiveText);
+            Assert.IsNotNull(second.CurrentSegment);
+            Guid secondId = second.CurrentSegment.Id;
+            Assert.AreNotEqual(firstId, secondId);
+
+            await replay.ObserveAsync(
+                $"{oldWindow} {firstSentence} {secondSentence}",
+                5900);
+            await replay.ObserveAsync(
+                $"{oldWindow} {firstSentence} {secondSentence}",
+                10000);
+
+            Assert.HasCount(2, replay.Recorded);
+            Assert.AreEqual(2, replay.Recorded.Select(item => item.Segment.Id).Distinct().Count());
+            Assert.AreEqual(secondId, replay.Recorded[1].Segment.Id);
+            Assert.AreEqual(secondSentence, replay.Recorded[1].Segment.Text);
+            Assert.HasCount(2, replay.ViewModel.Segments);
+            Assert.AreEqual(secondSentence, replay.ViewModel.Segments[1].SourceText);
+            Assert.HasCount(2, await replay.RowsAsync());
+            Assert.AreEqual(secondSentence, (await replay.RowsAsync())[1].SourceText);
+        }
+
+        [TestMethod]
         public async Task SourceExistsWhileProviderIsBlockedAndLatePlaceholderCannotClearTranslation()
         {
             await using Replay replay = await Replay.CreateAsync();
@@ -327,6 +381,17 @@ namespace LiveCaptionsTranslator.Tests
                 LectureSessionEntry session = await repository.CreateSessionAsync(
                     "Synthetic classroom replay", "", "Fake", "zh-CN");
                 return new Replay(root, connectionString, repository, session.Id);
+            }
+
+            public void StartFromCurrentSnapshot(string snapshot, int milliseconds)
+            {
+                lock (stateLock)
+                {
+                    source.StartFromCurrentSnapshot(
+                        snapshot,
+                        Start.AddMilliseconds(milliseconds));
+                    Policy.Reset();
+                }
             }
 
             public async Task<LiveCaptionUpdate> ObserveAsync(string snapshot, int milliseconds)

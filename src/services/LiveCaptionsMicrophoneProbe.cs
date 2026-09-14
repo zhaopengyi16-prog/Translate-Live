@@ -17,7 +17,8 @@ namespace LiveCaptionsTranslator.services
     public sealed record MicrophoneProbeResult(
         MicrophoneCaptionState State,
         bool AutomationAvailable,
-        string? ErrorCode = null);
+        string? ErrorCode = null,
+        bool ChangedByRequest = false);
 
     public static class LiveCaptionsMicrophoneProbe
     {
@@ -64,18 +65,20 @@ namespace LiveCaptionsTranslator.services
         }
 
         public static bool EnsureCaptureStartedAfterUserAction(
-            AutomationElement liveCaptionsWindow)
+            AutomationElement liveCaptionsWindow,
+            CancellationToken token = default)
         {
             bool restoreHiddenState = LiveCaptionsHandler.IsHiddenByCurrentApp;
             try
             {
+                token.ThrowIfCancellationRequested();
                 if (restoreHiddenState)
                     LiveCaptionsHandler.RestoreLiveCaptions(liveCaptionsWindow);
 
                 nint hWnd = new((long)liveCaptionsWindow.Current.NativeWindowHandle);
                 WindowsAPI.GetWindowThreadProcessId(hWnd, out int processId);
                 return processId != 0 &&
-                       CompleteLanguagePreparationAfterUserAction(processId);
+                       CompleteLanguagePreparationAfterUserAction(processId, token);
             }
             catch (ElementNotAvailableException)
             {
@@ -118,7 +121,9 @@ namespace LiveCaptionsTranslator.services
                 WindowsAPI.GetWindowThreadProcessId(hWnd, out processId);
 
                 if (requestedState == ToggleState.On &&
-                    !CompleteLanguagePreparationAfterUserAction(processId))
+                    !CompleteLanguagePreparationAfterUserAction(
+                        processId,
+                        CancellationToken.None))
                 {
                     return Failure(
                         MicrophoneCaptionState.Unknown,
@@ -194,7 +199,10 @@ namespace LiveCaptionsTranslator.services
                 lock (stateLock)
                     enabledByCurrentApp = requestedState == ToggleState.On;
 
-                return new(requestedMicrophoneState, true);
+                return new(
+                    requestedMicrophoneState,
+                    true,
+                    ChangedByRequest: true);
             }
             catch (ElementNotAvailableException)
             {
@@ -227,8 +235,11 @@ namespace LiveCaptionsTranslator.services
             }
         }
 
-        private static bool CompleteLanguagePreparationAfterUserAction(int processId)
+        private static bool CompleteLanguagePreparationAfterUserAction(
+            int processId,
+            CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             var continueButton = WaitForWindowElement(
                 processId,
                 CONTINUE_BUTTON_ID,
@@ -249,6 +260,7 @@ namespace LiveCaptionsTranslator.services
             var stopwatch = Stopwatch.StartNew();
             while (stopwatch.Elapsed < TimeSpan.FromSeconds(20))
             {
+                token.ThrowIfCancellationRequested();
                 if (WaitForWindowElement(
                         processId,
                         CONTINUE_BUTTON_ID,
@@ -257,7 +269,8 @@ namespace LiveCaptionsTranslator.services
                     return true;
                 }
 
-                Thread.Sleep(150);
+                if (token.WaitHandle.WaitOne(150))
+                    token.ThrowIfCancellationRequested();
             }
 
             return false;

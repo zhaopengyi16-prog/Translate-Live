@@ -538,7 +538,11 @@ namespace LiveCaptionsTranslator.Tests
                     LiveCaptionUpdate replay = resolver.Process(
                         string.Join(' ', rotated),
                         observedAt.AddMilliseconds(20));
-                    Assert.IsEmpty(replay.FinalizedSegments);
+                    Assert.IsEmpty(
+                        replay.FinalizedSegments,
+                        $"spoken={spoken}; " + string.Join(" | ",
+                            replay.FinalizedSegments.Select(segment =>
+                                $"{segment.Sequence}:{segment.Revision}:{segment.Text}")));
 
                     LiveCaptionUpdate restored = resolver.Process(
                         string.Join(' ', visibleWindow),

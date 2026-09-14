@@ -17,10 +17,28 @@ namespace LiveCaptionsTranslator.utils
             WriteCore(eventName, null, Math.Max(0, durationMilliseconds));
         }
 
+        public static void WriteCaptureStartup(
+            string stage,
+            string state,
+            long? captureEpoch,
+            long durationMilliseconds)
+        {
+            WriteCore(
+                "capture.startup",
+                null,
+                Math.Max(0, durationMilliseconds),
+                stage,
+                state,
+                captureEpoch);
+        }
+
         private static void WriteCore(
             string eventName,
             Exception? exception,
-            long? durationMilliseconds)
+            long? durationMilliseconds,
+            string? stage = null,
+            string? state = null,
+            long? captureEpoch = null)
         {
             try
             {
@@ -34,7 +52,10 @@ namespace LiveCaptionsTranslator.utils
                     eventName,
                     exceptionType = exception?.GetType().FullName,
                     hResult = exception?.HResult,
-                    durationMs = durationMilliseconds
+                    durationMs = durationMilliseconds,
+                    stage,
+                    state,
+                    captureEpoch
                 });
 
                 lock (logLock)

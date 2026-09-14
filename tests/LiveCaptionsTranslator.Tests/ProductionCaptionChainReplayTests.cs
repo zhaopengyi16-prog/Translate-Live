@@ -334,6 +334,116 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
+        public async Task CompletedDraftFinalReplayCannotAmplifyOneUtteranceAcrossProductionChain()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "LectureCopilot.Tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            string connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(root, "history.db"),
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false
+            }.ToString();
+
+            try
+            {
+                await CreateSchemaAsync(connectionString);
+                var repository = new LectureReviewRepository(connectionString);
+                LectureSessionEntry session = await repository.CreateSessionAsync(
+                    "定稿草稿交替隔离回放",
+                    "",
+                    "Fake",
+                    "zh-CN");
+                TranslationSegmentPersistence persistence =
+                    CreatePersistence(repository);
+                int persistedCallbacks = 0;
+                int translationCalls = 0;
+                var viewModel = new TranscriptSessionViewModel();
+                var queue = new TranslationTaskQueue(
+                    async (result, token) =>
+                    {
+                        await persistence.UpsertAsync(
+                            new TranslationPersistenceRequest(
+                                result.SessionId!.Value,
+                                result.Identity!,
+                                result.OriginalText,
+                                result.TranslatedText,
+                                result.TargetLanguage,
+                                result.ApiName),
+                            token);
+                        Interlocked.Increment(ref persistedCallbacks);
+                    },
+                    result => viewModel.ApplySegment(new TranscriptSegment(
+                        result.Identity!.SegmentId,
+                        result.Identity.Sequence,
+                        result.Identity.Revision,
+                        result.OriginalText,
+                        result.TranslatedText,
+                        SegmentState.Translated,
+                        result.Identity.CapturedAt)));
+                var resolver = new LiveCaptionIdentityResolver();
+                var emitted = new List<LiveCaptionSegment>();
+                DateTimeOffset start = new(
+                    2026, 9, 14, 12, 0, 0, TimeSpan.Zero);
+                const string finalText = "I can speak with you.";
+
+                void Submit(LiveCaptionUpdate update)
+                {
+                    foreach (LiveCaptionSegment segment in update.FinalizedSegments)
+                    {
+                        emitted.Add(segment);
+                        queue.Enqueue(
+                            (_, _) =>
+                            {
+                                Interlocked.Increment(ref translationCalls);
+                                return Task.FromResult<(string, bool)>(
+                                    ("测试译文。", true));
+                            },
+                            segment.Text,
+                            "Fake",
+                            session.Id,
+                            "zh-CN",
+                            Identity(segment),
+                            waitForPersistence: true);
+                    }
+                }
+
+                Submit(resolver.Process(finalText, start));
+                for (int cycle = 0; cycle < 40; cycle++)
+                {
+                    Submit(resolver.Process(
+                        finalText + " I can speak with you",
+                        start.AddMilliseconds(cycle * 100 + 25)));
+                    Submit(resolver.Process(
+                        finalText + " " + finalText,
+                        start.AddMilliseconds(cycle * 100 + 50)));
+                }
+
+                await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await queue.WaitForPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Volatile.Read(ref persistedCallbacks) == emitted.Count);
+                List<PersistedRow> rows = await LoadRowsAsync(
+                    connectionString,
+                    session.Id);
+
+                Assert.AreEqual(1, emitted.Count);
+                Assert.AreEqual(1, emitted.Select(segment => segment.Id).Distinct().Count());
+                Assert.AreEqual(1, translationCalls);
+                Assert.AreEqual(1, viewModel.Segments.Count);
+                Assert.AreEqual(1, rows.Count);
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [TestMethod]
         [DataRow(false)]
         [DataRow(true)]
         public async Task GrowingPunctuatedRecognitionUpdatesOneDatabaseAndWorkspaceRow(

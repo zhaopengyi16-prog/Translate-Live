@@ -7,6 +7,19 @@ using LiveCaptionsTranslator.apis;
 
 namespace LiveCaptionsTranslator.utils
 {
+    internal enum LiveCaptionsSnapshotKind
+    {
+        Unavailable,
+        CaptionTextNode,
+        ConfirmedEmptySurface
+    }
+
+    internal sealed record LiveCaptionsSnapshotReadResult(
+        bool IsReadable,
+        string Text,
+        string? ErrorCode = null,
+        LiveCaptionsSnapshotKind Kind = LiveCaptionsSnapshotKind.Unavailable);
+
     public static class LiveCaptionsHandler
     {
         public static readonly string PROCESS_NAME = "LiveCaptions";
@@ -413,6 +426,175 @@ namespace LiveCaptionsTranslator.utils
             {
                 captionsTextBlock = null;
                 throw;
+            }
+        }
+
+        internal static LiveCaptionsSnapshotReadResult ReadCaptionSnapshot(
+            AutomationElement window,
+            bool refreshNode,
+            TimeSpan timeout,
+            CancellationToken token = default)
+        {
+            if (refreshNode)
+                Interlocked.Exchange(ref captionsTextBlock, null);
+
+            var stopwatch = Stopwatch.StartNew();
+            string errorCode = "captions-node-unavailable";
+            bool automationFailureObserved = false;
+            do
+            {
+                token.ThrowIfCancellationRequested();
+                AutomationElement? node = Volatile.Read(ref captionsTextBlock);
+                if (node == null)
+                {
+                    node = FindElementByAId(window, "CaptionsTextBlock", token);
+                    if (node != null)
+                        Interlocked.Exchange(ref captionsTextBlock, node);
+                }
+
+                if (node != null)
+                {
+                    try
+                    {
+                        // An empty Name is a valid readable caption surface.
+                        return ClassifyCaptionSurface(
+                            captionNodeReadable: true,
+                            captionText: node.Current.Name,
+                            settingsAvailable: false,
+                            continueAvailable: false);
+                    }
+                    catch (ElementNotAvailableException)
+                    {
+                        Interlocked.CompareExchange(ref captionsTextBlock, null, node);
+                        errorCode = "captions-node-stale";
+                        automationFailureObserved = true;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        Interlocked.CompareExchange(ref captionsTextBlock, null, node);
+                        errorCode = "captions-node-invalid";
+                        automationFailureObserved = true;
+                    }
+                    catch (System.Runtime.InteropServices.COMException)
+                    {
+                        Interlocked.CompareExchange(ref captionsTextBlock, null, node);
+                        errorCode = "captions-node-com-failure";
+                        automationFailureObserved = true;
+                    }
+                }
+
+                bool settingsAvailable = false;
+                bool continueAvailable = false;
+                try
+                {
+                    settingsAvailable = IsVisibleAndEnabled(
+                        FindElementByAId(window, "SettingsButton", token),
+                        out bool settingsAccessFailed);
+                    continueAvailable = IsVisibleAndEnabled(
+                        FindElementByAId(window, "ContinueButton", token),
+                        out bool continueAccessFailed);
+                    automationFailureObserved |=
+                        settingsAccessFailed || continueAccessFailed;
+                }
+                catch (ElementNotAvailableException)
+                {
+                    automationFailureObserved = true;
+                    errorCode = "captions-shell-stale";
+                }
+                catch (InvalidOperationException)
+                {
+                    automationFailureObserved = true;
+                    errorCode = "captions-shell-invalid";
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                    automationFailureObserved = true;
+                    errorCode = "captions-shell-com-failure";
+                }
+
+                LiveCaptionsSnapshotReadResult surface = ClassifyCaptionSurface(
+                    captionNodeReadable: false,
+                    captionText: null,
+                    settingsAvailable: settingsAvailable,
+                    continueAvailable: continueAvailable,
+                    automationFailureObserved: automationFailureObserved,
+                    failureCode: errorCode);
+                if (surface.IsReadable)
+                    return surface;
+                errorCode = surface.ErrorCode ?? errorCode;
+
+                if (stopwatch.Elapsed >= timeout)
+                    break;
+                TimeSpan remaining = timeout - stopwatch.Elapsed;
+                int waitMilliseconds = (int)Math.Clamp(
+                    remaining.TotalMilliseconds,
+                    1,
+                    75);
+                if (token.WaitHandle.WaitOne(waitMilliseconds))
+                    token.ThrowIfCancellationRequested();
+            }
+            while (stopwatch.Elapsed < timeout);
+
+            return new(false, string.Empty, errorCode);
+        }
+
+        internal static LiveCaptionsSnapshotReadResult ClassifyCaptionSurface(
+            bool captionNodeReadable,
+            string? captionText,
+            bool settingsAvailable,
+            bool continueAvailable,
+            bool automationFailureObserved = false,
+            string? failureCode = null)
+        {
+            if (captionNodeReadable)
+            {
+                return new(
+                    true,
+                    captionText ?? string.Empty,
+                    Kind: LiveCaptionsSnapshotKind.CaptionTextNode);
+            }
+
+            // Windows does not instantiate CaptionsTextBlock until the first
+            // caption on some builds. A visible settings control with no
+            // preparation prompt is positive evidence of a ready, empty
+            // caption surface rather than a failed text-node lookup.
+            if (!automationFailureObserved && settingsAvailable && !continueAvailable)
+            {
+                return new(
+                    true,
+                    string.Empty,
+                    Kind: LiveCaptionsSnapshotKind.ConfirmedEmptySurface);
+            }
+
+            string errorCode = continueAvailable
+                ? "caption-preparation-required"
+                : automationFailureObserved
+                    ? failureCode ?? "captions-automation-failure"
+                    : !settingsAvailable
+                        ? "captions-shell-unavailable"
+                        : failureCode ?? "captions-node-unavailable";
+            return new(false, string.Empty, errorCode);
+        }
+
+        private static bool IsVisibleAndEnabled(
+            AutomationElement? element,
+            out bool accessFailed)
+        {
+            accessFailed = false;
+            if (element == null)
+                return false;
+
+            try
+            {
+                return !element.Current.IsOffscreen && element.Current.IsEnabled;
+            }
+            catch (Exception exception) when (
+                exception is ElementNotAvailableException or
+                    InvalidOperationException or
+                    System.Runtime.InteropServices.COMException)
+            {
+                accessFailed = true;
+                return false;
             }
         }
 

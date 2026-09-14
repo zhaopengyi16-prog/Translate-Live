@@ -3,6 +3,7 @@ using System.Runtime.Versioning;
 using System.Windows;
 
 [assembly: InternalsVisibleTo("LiveCaptionsTranslator.Tests")]
+[assembly: InternalsVisibleTo("LiveCaptionsTranslator.SmokeTests")]
 [assembly: SupportedOSPlatform("windows7.0")]
 [assembly: ThemeInfo(
     ResourceDictionaryLocation.None,            //where theme specific resource dictionaries are located

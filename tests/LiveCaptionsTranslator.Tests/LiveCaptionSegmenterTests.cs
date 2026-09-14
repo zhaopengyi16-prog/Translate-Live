@@ -152,7 +152,10 @@ namespace LiveCaptionsTranslator.Tests
 
             Assert.AreNotEqual(first.Id, second.Id);
             Assert.IsEmpty(duplicatePair.FinalizedSegments);
-            Assert.IsEmpty(duplicateTriple.FinalizedSegments);
+            Assert.IsEmpty(
+                duplicateTriple.FinalizedSegments,
+                string.Join(" | ", duplicateTriple.FinalizedSegments.Select(
+                    segment => $"{segment.Sequence}:{segment.Revision}:{segment.Text}")));
             Assert.AreEqual(second.Id, duplicatePair.CurrentSegment?.Id);
             Assert.AreEqual(second.Id, duplicateTriple.CurrentSegment?.Id);
             Assert.AreEqual(2, segmenter.RecentLedgerCount);
@@ -221,7 +224,10 @@ namespace LiveCaptionsTranslator.Tests
                 start.AddMinutes(1));
 
             Assert.HasCount(1, first.FinalizedSegments);
-            Assert.IsEmpty(second.FinalizedSegments);
+            Assert.IsEmpty(
+                second.FinalizedSegments,
+                string.Join(" | ", second.FinalizedSegments.Select(
+                    segment => $"{segment.Sequence}:{segment.Revision}:{segment.Text}")));
             Assert.HasCount(1, second.PendingCandidates);
             Assert.AreEqual(
                 first.FinalizedSegments[0].Id,
@@ -445,7 +451,7 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public void ShortTailGrowthOutsideEvidenceWindowStartsNewIdentity()
+        public void ShortTailGrowthOutsideEvidenceWindowRetainsIdentity()
         {
             var segmenter = new LiveCaptionSegmenter();
             var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
@@ -457,8 +463,9 @@ namespace LiveCaptionsTranslator.Tests
                 start + LiveCaptionSegmentationThresholds.ShortTailRevisionWindow +
                     TimeSpan.FromMilliseconds(1)).DraftSegment!;
 
-            Assert.AreNotEqual(first.Id, laterDraft.Id);
-            Assert.AreEqual(first.Sequence + 1, laterDraft.Sequence);
+            Assert.AreEqual(first.Id, laterDraft.Id);
+            Assert.AreEqual(first.Sequence, laterDraft.Sequence);
+            Assert.AreEqual(first.CapturedAt, laterDraft.CapturedAt);
         }
 
         [TestMethod]
@@ -507,7 +514,7 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public void ExplicitAppendedLongDraftDoesNotReopenThePreviousFinal()
+        public void DirectAppendedLongDraftWithoutTrajectoryReopensPreviousFinal()
         {
             var segmenter = new LiveCaptionSegmenter();
             const string text = "The example explains how the reading window behaves.";
@@ -517,9 +524,10 @@ namespace LiveCaptionsTranslator.Tests
             LiveCaptionSegment second = segmenter.Process(text + " " + draftText + ".")
                 .FinalizedSegments.Single();
 
-            Assert.AreNotEqual(first.Id, draft.Id);
+            Assert.AreEqual(first.Id, draft.Id);
             Assert.AreEqual(draft.Id, second.Id);
-            Assert.AreEqual(2, second.Sequence);
+            Assert.AreEqual(first.Sequence, second.Sequence);
+            Assert.AreEqual(first.CapturedAt, second.CapturedAt);
         }
 
         [TestMethod]
@@ -596,7 +604,36 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public void FullWindowAppendAfterDifferentSentencePreservesARepeat()
+        public void CompletedAndHistoricalDraftAlternationDoesNotMultiplyIdentities()
+        {
+            var segmenter = new LiveCaptionSegmenter();
+            var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
+            const string text = "I can speak with you.";
+            LiveCaptionSegment first = segmenter.Process(text, start)
+                .FinalizedSegments.Single();
+
+            var emitted = new List<LiveCaptionSegment> { first };
+            for (int cycle = 0; cycle < 20; cycle++)
+            {
+                LiveCaptionUpdate draftReplay = segmenter.Process(
+                    text + " I can speak with you",
+                    start.AddMilliseconds(cycle * 100 + 25));
+                LiveCaptionUpdate finalReplay = segmenter.Process(
+                    text + " " + text,
+                    start.AddMilliseconds(cycle * 100 + 50));
+                emitted.AddRange(draftReplay.FinalizedSegments);
+                emitted.AddRange(finalReplay.FinalizedSegments);
+            }
+
+            Assert.AreEqual(1, emitted.Select(segment => segment.Id).Distinct().Count());
+            Assert.AreEqual(1, emitted.Select(segment => segment.Sequence).Distinct().Count());
+            Assert.AreEqual(first.Id, segmenter.Process(
+                text,
+                start.AddSeconds(3)).CurrentSegment?.Id);
+        }
+
+        [TestMethod]
+        public void FullWindowAppendAfterDifferentSentenceRemainsPendingWithoutDraftEvidence()
         {
             var segmenter = new LiveCaptionSegmenter();
             var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
@@ -605,13 +642,91 @@ namespace LiveCaptionsTranslator.Tests
                 start);
             LiveCaptionSegment first = firstWindow.FinalizedSegments[0];
 
-            LiveCaptionSegment repeated = segmenter.Process(
+            LiveCaptionUpdate repeated = segmenter.Process(
                 "Hello. A different sentence. Hello.",
-                start.AddMilliseconds(200))
+                start.AddMilliseconds(200));
+
+            Assert.IsEmpty(repeated.FinalizedSegments);
+            Assert.HasCount(1, repeated.PendingCandidates);
+            Assert.AreEqual(first.Id, repeated.PendingCandidates[0].HistoricalSegmentId);
+            CollectionAssert.AreEqual(
+                firstWindow.WindowSegmentIds.ToArray(),
+                repeated.WindowSegmentIds.ToArray());
+        }
+
+        [TestMethod]
+        public void VisibleWindowEvidenceDoesNotExpireIntoANewIdentity()
+        {
+            var segmenter = new LiveCaptionSegmenter();
+            var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
+            LiveCaptionUpdate firstWindow = segmenter.Process(
+                "Hello. A different sentence.",
+                start);
+            LiveCaptionSegment first = firstWindow.FinalizedSegments[0];
+
+            segmenter.Process(
+                "Hello. A different sentence.",
+                start + LiveCaptionSegmentationThresholds.RecentLedgerRetention +
+                    TimeSpan.FromMilliseconds(1));
+            LiveCaptionUpdate replay = segmenter.Process(
+                "Hello. A different sentence. Hello.",
+                start + LiveCaptionSegmentationThresholds.RecentLedgerRetention +
+                    TimeSpan.FromMilliseconds(2));
+
+            Assert.IsEmpty(replay.FinalizedSegments);
+            Assert.HasCount(1, replay.PendingCandidates);
+            Assert.AreEqual(first.Id, replay.PendingCandidates[0].HistoricalSegmentId);
+            Assert.AreEqual(2, segmenter.RecentLedgerCount);
+        }
+
+        [TestMethod]
+        public void AdjacentProgressiveFinalsRemainOneLogicalIdentity()
+        {
+            var segmenter = new LiveCaptionSegmenter();
+            var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
+            const string firstText =
+                "Everything else kind of fades into the background.";
+            const string revisedText =
+                "Everything else kind of fades into the background during focused work.";
+            LiveCaptionSegment first = segmenter.Process(firstText, start)
                 .FinalizedSegments.Single();
 
-            Assert.AreNotEqual(first.Id, repeated.Id);
-            Assert.AreEqual(3, repeated.Sequence);
+            LiveCaptionUpdate update = segmenter.Process(
+                firstText + " " + revisedText,
+                start.AddMilliseconds(200));
+
+            Assert.HasCount(1, update.FinalizedSegments);
+            Assert.AreEqual(first.Id, update.FinalizedSegments[0].Id);
+            Assert.AreEqual(first.Sequence, update.FinalizedSegments[0].Sequence);
+            Assert.AreEqual(first.CapturedAt, update.FinalizedSegments[0].CapturedAt);
+            Assert.AreEqual(revisedText, update.FinalizedSegments[0].Text);
+            Assert.HasCount(1, update.WindowSegmentIds);
+        }
+
+        [TestMethod]
+        public void VisibleFinalAndDirectGrowingDraftRemainOneLogicalIdentity()
+        {
+            var segmenter = new LiveCaptionSegmenter();
+            var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
+            const string firstText = "And you know?";
+            const string growingText = "And you know what happens next";
+            const string finalText = "And you know what happens next?";
+            LiveCaptionSegment first = segmenter.Process(firstText, start)
+                .FinalizedSegments.Single();
+
+            LiveCaptionUpdate growing = segmenter.Process(
+                firstText + " " + growingText,
+                start.AddMilliseconds(200));
+            LiveCaptionUpdate final = segmenter.Process(
+                firstText + " " + finalText,
+                start.AddMilliseconds(400));
+
+            Assert.AreEqual(first.Id, growing.DraftSegment?.Id);
+            Assert.AreEqual(first.Sequence, growing.DraftSegment?.Sequence);
+            Assert.HasCount(1, final.FinalizedSegments);
+            Assert.AreEqual(first.Id, final.FinalizedSegments[0].Id);
+            Assert.AreEqual(first.CapturedAt, final.FinalizedSegments[0].CapturedAt);
+            Assert.HasCount(1, final.WindowSegmentIds);
         }
 
         [TestMethod]
@@ -709,7 +824,7 @@ namespace LiveCaptionsTranslator.Tests
         }
 
         [TestMethod]
-        public void LedgerExpiryDoesNotTurnAnUnchangedSnapshotIntoNewSpeech()
+        public void UnchangedVisibleSnapshotRefreshesLedgerWithoutNewSpeech()
         {
             var segmenter = new LiveCaptionSegmenter();
             var start = new DateTimeOffset(2026, 1, 1, 8, 0, 0, TimeSpan.Zero);
@@ -721,7 +836,7 @@ namespace LiveCaptionsTranslator.Tests
                 TimeSpan.FromSeconds(1));
 
             Assert.IsEmpty(repeated.FinalizedSegments);
-            Assert.AreEqual(0, segmenter.RecentLedgerCount);
+            Assert.AreEqual(1, segmenter.RecentLedgerCount);
         }
 
         [TestMethod]
@@ -806,6 +921,24 @@ namespace LiveCaptionsTranslator.Tests
                 TextUtil.NormalizeCaptionWhitespace(snapshot),
                 TextUtil.NormalizeCaptionWhitespace(
                     $"{string.Join(' ', update.FinalizedSentences)} {update.DraftText}"));
+        }
+
+        [TestMethod]
+        public void FirstPostEnableSnapshotMustNotBecomeTheNewClassroomBaseline()
+        {
+            var segmenter = new LiveCaptionSegmenter(splitLongDrafts: false);
+            DateTimeOffset start = new(2026, 9, 14, 8, 0, 0, TimeSpan.Zero);
+            segmenter.StartFromCurrentSnapshot("Old visible sentence.", start);
+
+            // Classroom startup now keeps the pre-enable baseline instead of
+            // resetting again after the microphone has become active.
+            LiveCaptionUpdate firstMicrophoneSnapshot = segmenter.Process(
+                "Old visible sentence. The microphone is working.",
+                start.AddSeconds(1));
+
+            CollectionAssert.AreEqual(
+                new[] { "The microphone is working." },
+                firstMicrophoneSnapshot.FinalizedSentences.ToArray());
         }
 
         [TestMethod]

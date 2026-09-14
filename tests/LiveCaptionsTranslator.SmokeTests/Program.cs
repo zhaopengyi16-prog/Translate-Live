@@ -20,6 +20,10 @@ int exitCode = 0;
 MicrophoneCaptionState? initialMicrophoneState = null;
 bool exerciseSystemAudio = args.Contains(
     "--system-audio",
+    StringComparer.OrdinalIgnoreCase) ||
+    args.Contains("--multi-voice-audio", StringComparer.OrdinalIgnoreCase);
+bool exerciseMultipleVoices = args.Contains(
+    "--multi-voice-audio",
     StringComparer.OrdinalIgnoreCase);
 
 if (args.Contains("--inspect-existing", StringComparer.OrdinalIgnoreCase))
@@ -54,15 +58,43 @@ try
     liveCaptionsProcessId = liveCaptionsWindow.Current.ProcessId;
     if (exerciseSystemAudio)
     {
+        bool sourcePrepared = LiveCaptionsMicrophoneProbe
+            .EnsureCaptureStartedAfterUserAction(liveCaptionsWindow);
+        LiveCaptionsSnapshotReadResult preSpeechBaseline = sourcePrepared
+            ? LiveCaptionsHandler.ReadCaptionSnapshot(
+                liveCaptionsWindow,
+                refreshNode: true,
+                TimeSpan.FromSeconds(3))
+            : new(false, string.Empty, "caption-source-not-prepared");
+        Console.WriteLine($"PreSpeechSourcePrepared={sourcePrepared}");
+        Console.WriteLine($"PreSpeechBaselineReadable={preSpeechBaseline.IsReadable}");
+        Console.WriteLine($"PreSpeechBaselineEmpty={preSpeechBaseline.IsReadable && preSpeechBaseline.Text.Length == 0}");
+        Console.WriteLine($"PreSpeechBaselineKind={preSpeechBaseline.Kind}");
+        Console.WriteLine($"PreSpeechBaselineErrorCode={preSpeechBaseline.ErrorCode ?? "none"}");
+        if (!preSpeechBaseline.IsReadable)
+            exitCode = 11;
+
         bool systemAudioDetected = ExerciseSystemAudio(
             liveCaptionsWindow,
+            exerciseMultipleVoices,
             out int initialCharacterCount,
-            out int finalCharacterCount);
+            out int finalCharacterCount,
+            out int installedVoiceCount,
+            out int snapshotFrames,
+            out int revisionEvents,
+            out int logicalIdentities);
         Console.WriteLine($"SystemAudioInitialCharacterCount={initialCharacterCount}");
         Console.WriteLine($"SystemAudioFinalCharacterCount={finalCharacterCount}");
         Console.WriteLine($"SystemAudioCaptionDetected={systemAudioDetected}");
+        Console.WriteLine($"SystemAudioInstalledVoiceCount={installedVoiceCount}");
+        Console.WriteLine($"SystemAudioSnapshotFrames={snapshotFrames}");
+        Console.WriteLine($"SystemAudioRevisionEvents={revisionEvents}");
+        Console.WriteLine($"SystemAudioLogicalIdentities={logicalIdentities}");
+        Console.WriteLine($"SystemAudioMultipleVoices={exerciseMultipleVoices}");
         if (!systemAudioDetected)
             exitCode = 7;
+        if (exerciseMultipleVoices && installedVoiceCount < 2)
+            exitCode = exitCode == 0 ? 14 : exitCode;
     }
 
     MicrophoneProbeResult result = LiveCaptionsMicrophoneProbe.ReadState(liveCaptionsWindow);
@@ -79,19 +111,35 @@ try
     {
         MicrophoneProbeResult enabled = LiveCaptionsMicrophoneProbe.EnableAfterUserAction(liveCaptionsWindow);
         Console.WriteLine($"EnableState={enabled.State}");
+        Console.WriteLine($"EnableChangedByRequest={enabled.ChangedByRequest}");
         Console.WriteLine($"EnableErrorCode={enabled.ErrorCode ?? "none"}");
         if (enabled.State != MicrophoneCaptionState.On)
         {
             exitCode = exitCode == 0 ? 5 : exitCode;
         }
-        else if (initialMicrophoneState == MicrophoneCaptionState.Off)
+        else
         {
-            MicrophoneProbeResult restored =
-                LiveCaptionsMicrophoneProbe.DisableAfterUserAction(liveCaptionsWindow);
-            Console.WriteLine($"RestoreState={restored.State}");
-            Console.WriteLine($"RestoreErrorCode={restored.ErrorCode ?? "none"}");
-            if (restored.State != MicrophoneCaptionState.Off)
-                exitCode = exitCode == 0 ? 6 : exitCode;
+            LiveCaptionsSnapshotReadResult rebound =
+                LiveCaptionsHandler.ReadCaptionSnapshot(
+                    liveCaptionsWindow,
+                    refreshNode: true,
+                    TimeSpan.FromSeconds(3));
+            Console.WriteLine($"PostEnableCaptionNodeReadable={rebound.IsReadable}");
+            Console.WriteLine($"PostEnableCaptionSurfaceEmpty={rebound.IsReadable && rebound.Text.Length == 0}");
+            Console.WriteLine($"PostEnableCaptionSnapshotKind={rebound.Kind}");
+            Console.WriteLine($"PostEnableCaptionNodeErrorCode={rebound.ErrorCode ?? "none"}");
+            if (!rebound.IsReadable)
+                exitCode = exitCode == 0 ? 8 : exitCode;
+
+            if (initialMicrophoneState == MicrophoneCaptionState.Off)
+            {
+                MicrophoneProbeResult restored =
+                    LiveCaptionsMicrophoneProbe.DisableAfterUserAction(liveCaptionsWindow);
+                Console.WriteLine($"RestoreState={restored.State}");
+                Console.WriteLine($"RestoreErrorCode={restored.ErrorCode ?? "none"}");
+                if (restored.State != MicrophoneCaptionState.Off)
+                    exitCode = exitCode == 0 ? 6 : exitCode;
+            }
         }
     }
 }
@@ -130,11 +178,20 @@ return exitCode;
 
 static bool ExerciseSystemAudio(
     AutomationElement liveCaptionsWindow,
+    bool useMultipleVoices,
     out int initialCharacterCount,
-    out int finalCharacterCount)
+    out int finalCharacterCount,
+    out int installedVoiceCount,
+    out int snapshotFrames,
+    out int revisionEvents,
+    out int logicalIdentities)
 {
     initialCharacterCount = ReadCaptionCharacterCount(liveCaptionsWindow);
     finalCharacterCount = initialCharacterCount;
+    installedVoiceCount = 0;
+    snapshotFrames = 0;
+    revisionEvents = 0;
+    logicalIdentities = 0;
 
     if (!LiveCaptionsMicrophoneProbe.EnsureCaptureStartedAfterUserAction(
             liveCaptionsWindow))
@@ -142,45 +199,112 @@ static bool ExerciseSystemAudio(
         return false;
     }
 
-    object? voice = null;
+    object? primaryVoice = null;
+    object? secondaryVoice = null;
+    object? installedVoices = null;
+    object? primaryToken = null;
+    object? secondaryToken = null;
     try
     {
         Type? voiceType = Type.GetTypeFromProgID("SAPI.SpVoice");
         if (voiceType == null)
             return false;
 
-        voice = Activator.CreateInstance(voiceType);
-        if (voice == null)
+        primaryVoice = Activator.CreateInstance(voiceType);
+        if (primaryVoice == null)
             return false;
 
-        voiceType.InvokeMember(
-            "Speak",
-            BindingFlags.InvokeMethod,
-            binder: null,
-            target: voice,
-            args: new object[]
-            {
-                "The lecture timeline keeps every sentence in order for review.",
-                0
-            });
-
-        var timeout = Stopwatch.StartNew();
-        while (timeout.Elapsed < TimeSpan.FromSeconds(10))
+        dynamic primary = primaryVoice;
+        installedVoices = primary.GetVoices();
+        dynamic voices = installedVoices;
+        installedVoiceCount = Convert.ToInt32(voices.Count);
+        if (installedVoiceCount > 0)
         {
-            finalCharacterCount = ReadCaptionCharacterCount(liveCaptionsWindow);
-            if (finalCharacterCount > initialCharacterCount)
-                return true;
-
-            Thread.Sleep(150);
+            primaryToken = voices.Item(0);
+            primary.Voice = primaryToken;
         }
 
-        return false;
+        if (useMultipleVoices && installedVoiceCount >= 2)
+        {
+            secondaryVoice = Activator.CreateInstance(voiceType);
+            if (secondaryVoice == null)
+                return false;
+            dynamic secondary = secondaryVoice;
+            secondaryToken = voices.Item(1);
+            secondary.Voice = secondaryToken;
+        }
+
+        var resolver = new LiveCaptionIdentityResolver(splitLongDrafts: false);
+        resolver.StartFromCurrentSnapshot(ReadCaptionText(liveCaptionsWindow));
+        var observedIdentities = new HashSet<Guid>();
+        string previousSnapshot = string.Empty;
+
+        dynamic firstSpeaker = primaryVoice;
+        firstSpeaker.Speak(
+            "The first speaker introduces the topic. The first speaker explains one result. " +
+            "The first speaker closes with a short summary.",
+            1);
+        if (secondaryVoice != null)
+        {
+            Thread.Sleep(300);
+            dynamic secondSpeaker = secondaryVoice;
+            secondSpeaker.Speak(
+                "The second speaker adds another example. The second speaker compares the evidence. " +
+                "The second speaker confirms the final condition.",
+                1);
+        }
+
+        var timeout = Stopwatch.StartNew();
+        while (timeout.Elapsed < TimeSpan.FromSeconds(12))
+        {
+            string snapshot = ReadCaptionText(liveCaptionsWindow);
+            finalCharacterCount = snapshot.Length;
+            if (!string.Equals(snapshot, previousSnapshot, StringComparison.Ordinal))
+            {
+                snapshotFrames++;
+                LiveCaptionUpdate update = resolver.Process(
+                    snapshot,
+                    DateTimeOffset.UtcNow);
+                revisionEvents += update.FinalizedSegments.Count;
+                foreach (LiveCaptionSegment segment in update.FinalizedSegments)
+                    observedIdentities.Add(segment.Id);
+                previousSnapshot = snapshot;
+            }
+
+            Thread.Sleep(75);
+        }
+
+        logicalIdentities = observedIdentities.Count;
+        return finalCharacterCount > initialCharacterCount;
     }
     finally
     {
-        if (voice != null && Marshal.IsComObject(voice))
-            Marshal.FinalReleaseComObject(voice);
+        ReleaseComObject(secondaryToken);
+        ReleaseComObject(primaryToken);
+        ReleaseComObject(installedVoices);
+        ReleaseComObject(secondaryVoice);
+        ReleaseComObject(primaryVoice);
     }
+}
+
+static string ReadCaptionText(AutomationElement liveCaptionsWindow)
+{
+    try
+    {
+        return FindRawDescendant(liveCaptionsWindow, "CaptionsTextBlock")
+            ?.Current.Name ?? string.Empty;
+    }
+    catch (Exception exception) when (
+        exception is ElementNotAvailableException or InvalidOperationException or COMException)
+    {
+        return string.Empty;
+    }
+}
+
+static void ReleaseComObject(object? value)
+{
+    if (value != null && Marshal.IsComObject(value))
+        Marshal.FinalReleaseComObject(value);
 }
 
 static int ReadCaptionCharacterCount(AutomationElement liveCaptionsWindow)

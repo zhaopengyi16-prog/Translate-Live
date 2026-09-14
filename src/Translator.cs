@@ -45,6 +45,9 @@ namespace LiveCaptionsTranslator
             CreatePersistedSegmentAsync,
             UpdatePersistedSegmentAsync);
         private static bool captureSuspended;
+        private static long capturePreparationSequence;
+        private static long activeCapturePreparationId;
+        private static AutomationElement? preparedCaptureWindow;
 
         public static AutomationElement? Window
         {
@@ -854,6 +857,8 @@ namespace LiveCaptionsTranslator
             lock (captureStateLock)
             {
                 Volatile.Write(ref captureSuspended, true);
+                activeCapturePreparationId = 0;
+                preparedCaptureWindow = null;
                 long? sessionId = LectureSessionTracker.CurrentSessionId;
                 foreach (RecordedCaption record in recordingPolicy.Flush())
                     PublishRecordedCaption(record, sessionId, CaptureEpoch, enqueueTranslation: false);
@@ -876,17 +881,91 @@ namespace LiveCaptionsTranslator
                 provisionalTranslations.Clear();
             }
             await segmentPersistence.ClearAsync(token).ConfigureAwait(false);
-            ClearContexts();
-            if (Caption != null)
+            ClearCapturePresentation();
+        }
+
+        internal static async Task<PreparedCaptureSession>
+            PrepareSuspendedCaptureFromBaselineAsync(
+                AutomationElement expectedWindow,
+                string baselineSnapshot,
+                CancellationToken token = default)
+        {
+            ArgumentNullException.ThrowIfNull(expectedWindow);
+            ArgumentNullException.ThrowIfNull(baselineSnapshot);
+
+            await segmentPersistence.ClearAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+
+            long epoch;
+            long preparationId;
+            lock (translationIngressLock)
+            lock (captureStateLock)
             {
-                Caption.ClearCurrentSegment();
-                Caption.OriginalCaption = string.Empty;
-                Caption.TranslatedCaption = string.Empty;
-                Caption.DisplayOriginalCaption = string.Empty;
-                Caption.DisplayTranslatedCaption = string.Empty;
-                Caption.OverlayOriginalCaption = " ";
-                Caption.OverlayNoticePrefix = " ";
-                Caption.OverlayCurrentTranslation = " ";
+                if (!Volatile.Read(ref captureSuspended))
+                {
+                    throw new InvalidOperationException(
+                        "Capture must be suspended before preparing a baseline.");
+                }
+                if (!ReferenceEquals(expectedWindow, Window))
+                {
+                    throw new InvalidOperationException(
+                        "The Live Captions window changed during capture startup.");
+                }
+
+                epoch = Interlocked.Increment(ref captureEpoch);
+                captionIdentityResolver.StartFromCurrentSnapshot(
+                    baselineSnapshot,
+                    observationOrigin + observationClock.Elapsed);
+                recordingPolicy.Reset();
+                provisionalTranslations.Clear();
+                preparationId = Interlocked.Increment(ref capturePreparationSequence);
+                activeCapturePreparationId = preparationId;
+                preparedCaptureWindow = expectedWindow;
+            }
+
+            ClearCapturePresentation();
+            return new PreparedCaptureSession(epoch, preparationId);
+        }
+
+        internal static bool ResumePreparedCapture(
+            PreparedCaptureSession preparation,
+            long sessionId,
+            AutomationElement expectedWindow)
+        {
+            lock (captureStateLock)
+            {
+                if (!Volatile.Read(ref captureSuspended) ||
+                    preparation.CaptureEpoch != CaptureEpoch ||
+                    preparation.PreparationId != activeCapturePreparationId ||
+                    sessionId != LectureSessionTracker.CurrentSessionId ||
+                    !ReferenceEquals(expectedWindow, Window) ||
+                    !ReferenceEquals(expectedWindow, preparedCaptureWindow))
+                {
+                    return false;
+                }
+
+                activeCapturePreparationId = 0;
+                preparedCaptureWindow = null;
+                Volatile.Write(ref captureSuspended, false);
+                return true;
+            }
+        }
+
+        internal static void CancelPreparedCapture(PreparedCaptureSession? preparation)
+        {
+            if (preparation == null)
+                return;
+
+            lock (captureStateLock)
+            {
+                if (preparation.CaptureEpoch != CaptureEpoch ||
+                    preparation.PreparationId != activeCapturePreparationId)
+                {
+                    return;
+                }
+
+                activeCapturePreparationId = 0;
+                preparedCaptureWindow = null;
             }
         }
 
@@ -898,8 +977,26 @@ namespace LiveCaptionsTranslator
                 // on screen from a previous class or a rebuilt source window.
                 captionIdentityResolver.Reset();
                 recordingPolicy.Reset();
+                activeCapturePreparationId = 0;
+                preparedCaptureWindow = null;
                 Volatile.Write(ref captureSuspended, false);
             }
+        }
+
+        private static void ClearCapturePresentation()
+        {
+            ClearContexts();
+            if (Caption == null)
+                return;
+
+            Caption.ClearCurrentSegment();
+            Caption.OriginalCaption = string.Empty;
+            Caption.TranslatedCaption = string.Empty;
+            Caption.DisplayOriginalCaption = string.Empty;
+            Caption.DisplayTranslatedCaption = string.Empty;
+            Caption.OverlayOriginalCaption = " ";
+            Caption.OverlayNoticePrefix = " ";
+            Caption.OverlayCurrentTranslation = " ";
         }
 
         private static Task<TranslationHistoryEntry> CreatePersistedSegmentAsync(

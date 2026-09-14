@@ -27,6 +27,7 @@ namespace LiveCaptionsTranslator
         private readonly SemaphoreSlim modeTransitionGate = new(1, 1);
         private readonly LectureSummaryService summaryService = new();
         private CancellationTokenSource? demoCancellation;
+        private CancellationTokenSource? modeTransitionCancellation;
         private Task? demoTask;
         private DateTimeOffset sessionStartedAt = DateTimeOffset.Now;
         private long legacySequence;
@@ -103,6 +104,7 @@ namespace LiveCaptionsTranslator
         private void LectureWorkspacePage_Unloaded(object sender, RoutedEventArgs e)
         {
             elapsedTimer.Stop();
+            modeTransitionCancellation?.Cancel();
             if (settingSubscribed && Translator.Setting != null)
             {
                 Translator.Setting.PropertyChanged -= Setting_PropertyChanged;
@@ -604,16 +606,26 @@ namespace LiveCaptionsTranslator
         private async void OnlineCourse_Click(object sender, RoutedEventArgs e)
         {
             MorePopup.IsOpen = false;
-            await RunModeTransitionAsync(EnterOnlineCourseAsync);
+            await RunModeTransitionAsync(token => EnterCaptureModeAsync(
+                microphoneMode: false,
+                token));
         }
 
         private async void ReconnectLiveCaptions_Click(object sender, RoutedEventArgs e)
         {
             MorePopup.IsOpen = false;
+            await RunModeTransitionAsync(ReconnectLiveCaptionsAsync);
+        }
+
+        private async Task ReconnectLiveCaptionsAsync(CancellationToken token)
+        {
             viewModel.LiveCaptionsStatus = "正在连接 Live Captions";
             viewModel.SessionStatus = "正在重新连接 Windows 实时字幕";
 
-            bool connected = await Translator.ConnectLiveCaptionsAsync(userInitiated: true);
+            bool connected = await Translator.ConnectLiveCaptionsAsync(
+                userInitiated: true,
+                token);
+            token.ThrowIfCancellationRequested();
             viewModel.LiveCaptionsStatus = connected
                 ? "Live Captions 已就绪"
                 : "Live Captions 未连接";
@@ -629,12 +641,26 @@ namespace LiveCaptionsTranslator
             }
         }
 
-        private async Task EnterOnlineCourseAsync()
+        private async void ClassroomMode_Click(object sender, RoutedEventArgs e)
+        {
+            MorePopup.IsOpen = false;
+            await RunModeTransitionAsync(token => EnterCaptureModeAsync(
+                microphoneMode: true,
+                token));
+        }
+
+        private async Task EnterCaptureModeAsync(
+            bool microphoneMode,
+            CancellationToken token)
         {
             await StopDemoAsync();
-            await Translator.StopCaptureAndFlushAsync();
-            await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText);
-            viewModel.CanEndSession = false;
+            token.ThrowIfCancellationRequested();
+            if (Translator.Setting == null)
+            {
+                viewModel.SessionStatus = "设置尚未加载，请稍后重试";
+                return;
+            }
+
             var liveCaptionsWindow = Translator.Window;
             if (liveCaptionsWindow == null)
             {
@@ -643,82 +669,139 @@ namespace LiveCaptionsTranslator
                 return;
             }
 
-            if (LiveCaptionsMicrophoneProbe.WasEnabledByCurrentApp)
+            string mode = microphoneMode
+                ? "线下课堂 · 麦克风"
+                : "在线课程 · 电脑声音";
+            string engine = Translator.Setting.ActiveEngineDisplayName;
+            string targetLanguage = Translator.Setting.TargetLanguage;
+            viewModel.CaptureMode = mode;
+            viewModel.MicrophoneStatus = microphoneMode
+                ? "正在请求本次麦克风…"
+                : "未使用麦克风";
+            viewModel.SessionStatus = microphoneMode
+                ? "正在准备线下课堂"
+                : "正在启动电脑声音捕捉";
+
+            var operations = new CaptureStartupOperations
             {
-                await RestoreLiveCaptionsForMicrophoneControlAsync(liveCaptionsWindow);
-                var result = await Task.Run(() =>
-                    LiveCaptionsMicrophoneProbe.DisableAfterUserAction(liveCaptionsWindow));
-                if (result.State == MicrophoneCaptionState.Off)
+                EndPreviousSessionAsync = async cancellationToken =>
                 {
+                    await Translator.StopCaptureAndFlushAsync(cancellationToken);
+                    await LectureSessionTracker.EndCurrentAsync(
+                        viewModel.SummaryText,
+                        cancellationToken);
                     viewModel.CanEndSession = false;
-                    LiveCaptionsHandler.HideLiveCaptions(liveCaptionsWindow);
-                }
-            }
-
-            viewModel.CaptureMode = "在线课程 · 电脑声音";
-            viewModel.MicrophoneStatus = "未使用麦克风";
-            viewModel.SessionStatus = "正在启动电脑声音捕捉";
-            bool captureStarted = await Task.Run(() =>
-                LiveCaptionsMicrophoneProbe.EnsureCaptureStartedAfterUserAction(
-                    liveCaptionsWindow));
-            if (!captureStarted)
-            {
-                viewModel.LiveCaptionsStatus = "Live Captions 等待确认";
-                viewModel.SessionStatus = "请在 Windows 实时字幕中点击继续后重试";
-                LiveCaptionsHandler.RestoreLiveCaptions(liveCaptionsWindow);
-                return;
-            }
-
-            viewModel.LiveCaptionsStatus = "Live Captions 正在工作";
-            await BeginLectureSessionAsync(viewModel.CaptureMode);
-            viewModel.SessionStatus = "正在监听电脑声音";
-        }
-
-        private async void ClassroomMode_Click(object sender, RoutedEventArgs e)
-        {
-            MorePopup.IsOpen = false;
-            await RunModeTransitionAsync(EnterClassroomModeAsync);
-        }
-
-        private async Task EnterClassroomModeAsync()
-        {
-            await StopDemoAsync();
-            await Translator.StopCaptureAndFlushAsync();
-            await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText);
-            viewModel.CanEndSession = false;
-            if (Translator.Window == null)
-            {
-                viewModel.LiveCaptionsStatus = "Live Captions 未连接";
-                viewModel.SessionStatus = "请先恢复 Windows 实时字幕";
-                return;
-            }
-
-            viewModel.CaptureMode = "线下课堂 · 麦克风";
-            viewModel.MicrophoneStatus = "正在请求本次麦克风…";
-            viewModel.SessionStatus = "正在准备线下课堂";
-
-            await RestoreLiveCaptionsForMicrophoneControlAsync(Translator.Window);
-            var result = await Task.Run(() =>
-                LiveCaptionsMicrophoneProbe.EnableAfterUserAction(Translator.Window));
-            if (result.State == MicrophoneCaptionState.On)
-            {
-                LiveCaptionsHandler.HideLiveCaptions(Translator.Window);
-                viewModel.LiveCaptionsStatus = "Live Captions 正在工作";
-                viewModel.MicrophoneStatus = "麦克风已开启";
-                viewModel.SessionStatus = "正在监听线下课堂";
-                await BeginLectureSessionAsync(viewModel.CaptureMode);
-                viewModel.SessionStatus = "正在监听线下课堂";
-                return;
-            }
-
-            viewModel.MicrophoneStatus = result.State switch
-            {
-                MicrophoneCaptionState.Blocked => "麦克风被系统隐私设置阻止",
-                MicrophoneCaptionState.Off => "麦克风仍为关闭状态",
-                _ => "无法自动确认麦克风状态"
+                },
+                PrepareCaptionSourceAsync = async cancellationToken =>
+                {
+                    await RestoreLiveCaptionsForMicrophoneControlAsync(
+                        liveCaptionsWindow,
+                        cancellationToken);
+                    bool prepared = await Task.Run(() =>
+                        LiveCaptionsMicrophoneProbe.EnsureCaptureStartedAfterUserAction(
+                            liveCaptionsWindow,
+                            cancellationToken));
+                    return new CaptureStepResult(
+                        prepared,
+                        prepared ? null : "livecaptions-preparation-timeout");
+                },
+                ReadBaselineAsync = cancellationToken => ReadCaptionSnapshotAsync(
+                    liveCaptionsWindow,
+                    refreshNode: true,
+                    cancellationToken),
+                PrepareCaptureAsync = (baseline, cancellationToken) =>
+                    Translator.PrepareSuspendedCaptureFromBaselineAsync(
+                        liveCaptionsWindow,
+                        baseline,
+                        cancellationToken),
+                CreateSessionAsync = async cancellationToken =>
+                {
+                    LectureSessionEntry session = await LectureSessionTracker.BeginAsync(
+                        mode,
+                        engine,
+                        targetLanguage,
+                        cancellationToken);
+                    BindNewCaptureSession(session);
+                    return session;
+                },
+                ActivateInputAsync = cancellationToken => ActivateCaptureInputAsync(
+                    liveCaptionsWindow,
+                    microphoneMode,
+                    cancellationToken),
+                RebindCaptionSourceAsync = cancellationToken => ReadCaptionSnapshotAsync(
+                    liveCaptionsWindow,
+                    refreshNode: true,
+                    cancellationToken),
+                ResumeCapture = (preparation, sessionId) =>
+                    Translator.ResumePreparedCapture(
+                        preparation,
+                        sessionId,
+                        liveCaptionsWindow),
+                AbortAsync = (preparation, sessionId, inputChanged, cancellationToken) =>
+                    AbortCaptureStartupAsync(
+                        liveCaptionsWindow,
+                        microphoneMode,
+                        preparation,
+                        sessionId,
+                        inputChanged,
+                        cancellationToken),
+                ReportStage = (stage, state, epoch, duration) =>
+                    ProductDiagnostics.WriteCaptureStartup(
+                        stage.ToString(),
+                        state,
+                        epoch,
+                        duration)
             };
-            viewModel.SessionStatus = "已打开 Windows 实时字幕，请完成最后一步";
-            LiveCaptionsHandler.RestoreLiveCaptions(Translator.Window);
+
+            CaptureStartupResult result = await CaptureStartupSequence.RunAsync(
+                operations,
+                token);
+            if (!result.IsStarted)
+            {
+                if (result.Stage == CaptureStartupStage.Cancelled)
+                    return;
+
+                viewModel.CanEndSession = false;
+                viewModel.LiveCaptionsStatus = result.Stage is
+                    CaptureStartupStage.PreparingCaptionSource or
+                    CaptureStartupStage.ReadingBaseline or
+                    CaptureStartupStage.RebindingCaptionSource
+                        ? "Live Captions 等待确认"
+                        : "Live Captions 已就绪";
+                viewModel.MicrophoneStatus = microphoneMode
+                    ? result.Stage == CaptureStartupStage.ActivatingInput
+                        ? "麦克风未能开启，可重试"
+                        : "麦克风启动未完成"
+                    : "未使用麦克风";
+                viewModel.SessionStatus = DescribeCaptureStartupFailure(result);
+                ProductDiagnostics.Write(
+                    $"capture.startup.failed.{result.Stage}",
+                    result.Exception);
+                try
+                {
+                    LiveCaptionsHandler.RestoreLiveCaptions(liveCaptionsWindow);
+                }
+                catch (Exception exception) when (
+                    exception is System.Windows.Automation.ElementNotAvailableException or
+                        InvalidOperationException)
+                {
+                    ProductDiagnostics.Write(
+                        "capture.startup.restore-window-failed",
+                        exception);
+                }
+                return;
+            }
+
+            token.ThrowIfCancellationRequested();
+            viewModel.CanEndSession = true;
+            viewModel.LiveCaptionsStatus = "Live Captions 正在工作";
+            viewModel.MicrophoneStatus = microphoneMode
+                ? "麦克风已开启"
+                : "未使用麦克风";
+            viewModel.SessionStatus = microphoneMode
+                ? "正在监听线下课堂"
+                : "正在监听电脑声音";
+            LiveCaptionsHandler.HideLiveCaptions(liveCaptionsWindow);
         }
 
         private async Task StopDemoAsync()
@@ -737,13 +820,16 @@ namespace LiveCaptionsTranslator
             await RunModeTransitionAsync(EndLectureSessionAsync);
         }
 
-        private async Task EndLectureSessionAsync()
+        private async Task EndLectureSessionAsync(CancellationToken token)
         {
             if (Translator.Window != null && LiveCaptionsMicrophoneProbe.WasEnabledByCurrentApp)
             {
-                await RestoreLiveCaptionsForMicrophoneControlAsync(Translator.Window);
+                await RestoreLiveCaptionsForMicrophoneControlAsync(
+                    Translator.Window,
+                    token);
                 var result = await Task.Run(() =>
                     LiveCaptionsMicrophoneProbe.DisableAfterUserAction(Translator.Window));
+                token.ThrowIfCancellationRequested();
                 if (result.State != MicrophoneCaptionState.Off)
                 {
                     viewModel.MicrophoneStatus = "未能确认麦克风已停止，请检查系统字幕";
@@ -755,8 +841,9 @@ namespace LiveCaptionsTranslator
                 viewModel.MicrophoneStatus = "本次麦克风已停止";
             }
 
-            await Translator.StopCaptureAndFlushAsync();
-            await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText);
+            await Translator.StopCaptureAndFlushAsync(token);
+            await LectureSessionTracker.EndCurrentAsync(viewModel.SummaryText, token);
+            token.ThrowIfCancellationRequested();
             viewModel.CanEndSession = false;
             viewModel.LiveCaptionsStatus = Translator.Window == null
                 ? "Live Captions 未连接"
@@ -767,47 +854,162 @@ namespace LiveCaptionsTranslator
                 await ownerWindow.RefreshRecentSessionsAsync();
         }
 
-        private async Task BeginLectureSessionAsync(string mode)
+        private static async Task<CaptionSourceSnapshot> ReadCaptionSnapshotAsync(
+            System.Windows.Automation.AutomationElement liveCaptionsWindow,
+            bool refreshNode,
+            CancellationToken token)
         {
-            if (Translator.Setting == null)
-                return;
+            LiveCaptionsSnapshotReadResult result = await Task.Run(() =>
+                LiveCaptionsHandler.ReadCaptionSnapshot(
+                    liveCaptionsWindow,
+                    refreshNode,
+                    TimeSpan.FromSeconds(3),
+                    token));
+            return result.IsReadable
+                ? CaptionSourceSnapshot.Readable(result.Text)
+                : CaptionSourceSnapshot.Unavailable(
+                    result.ErrorCode ?? "captions-node-unavailable");
+        }
 
-            await Translator.SuspendAndResetCaptureAsync();
-            LectureSessionEntry session;
-            try
+        private static async Task<CaptureInputActivation> ActivateCaptureInputAsync(
+            System.Windows.Automation.AutomationElement liveCaptionsWindow,
+            bool microphoneMode,
+            CancellationToken token)
+        {
+            if (!microphoneMode && !LiveCaptionsMicrophoneProbe.WasEnabledByCurrentApp)
+                return new(true, false);
+
+            MicrophoneProbeResult result = await Task.Run(() => microphoneMode
+                ? LiveCaptionsMicrophoneProbe.EnableAfterUserAction(liveCaptionsWindow)
+                : LiveCaptionsMicrophoneProbe.DisableAfterUserAction(liveCaptionsWindow));
+            bool active = microphoneMode
+                ? result.State == MicrophoneCaptionState.On
+                : result.State == MicrophoneCaptionState.Off;
+            return new CaptureInputActivation(
+                active,
+                microphoneMode && result.ChangedByRequest,
+                result.ErrorCode);
+        }
+
+        private async Task AbortCaptureStartupAsync(
+            System.Windows.Automation.AutomationElement liveCaptionsWindow,
+            bool microphoneMode,
+            PreparedCaptureSession? preparation,
+            long? sessionId,
+            bool inputChangedByRequest,
+            CancellationToken token)
+        {
+            Translator.CancelPreparedCapture(preparation);
+            if (microphoneMode && inputChangedByRequest &&
+                LiveCaptionsMicrophoneProbe.WasEnabledByCurrentApp)
             {
-                session = await LectureSessionTracker.BeginAsync(
-                    mode,
-                    Translator.Setting.ActiveEngineDisplayName,
-                    Translator.Setting.TargetLanguage);
+                await RestoreLiveCaptionsForMicrophoneControlAsync(
+                    liveCaptionsWindow,
+                    token);
+                await Task.Run(() =>
+                    LiveCaptionsMicrophoneProbe.DisableAfterUserAction(
+                        liveCaptionsWindow));
             }
-            finally
+
+            if (sessionId.HasValue)
             {
-                Translator.ResumeCapture();
+                EmptySessionAbortResult abortResult =
+                    await LectureSessionTracker.AbortCurrentIfEmptyAsync(
+                        sessionId.Value,
+                        token);
+                ProductDiagnostics.WriteCaptureStartup(
+                    CaptureStartupStage.Cancelled.ToString(),
+                    $"session-{abortResult}",
+                    preparation?.CaptureEpoch,
+                    0);
+                UnbindCaptureSession(sessionId.Value);
             }
+        }
+
+        private void BindNewCaptureSession(LectureSessionEntry session)
+        {
+            workspaceGeneration++;
+            displayedSessionId = session.Id;
             sessionStartedAt = session.StartedAt;
-            viewModel.CanEndSession = true;
+            loadedEntryIds.Clear();
+            loadedSegmentIds.Clear();
+            legacySequence = 0;
+            lock (historyProjectionLock)
+            {
+                historyProjectionInitializing = false;
+                pendingHistoryChanges.Clear();
+            }
+            viewModel.ResetTimeline();
             viewModel.SummaryText = string.Empty;
             viewModel.SummaryStatus = "尚未生成课堂总结";
-            await LoadRecentHistoryAsync(clearTimeline: true);
+        }
+
+        private void UnbindCaptureSession(long sessionId)
+        {
+            if (displayedSessionId != sessionId)
+                return;
+
+            workspaceGeneration++;
+            displayedSessionId = null;
+            loadedEntryIds.Clear();
+            loadedSegmentIds.Clear();
+            viewModel.ResetTimeline();
+        }
+
+        private static string DescribeCaptureStartupFailure(CaptureStartupResult result)
+        {
+            string message = result.Stage switch
+            {
+                CaptureStartupStage.PreparingCaptionSource =>
+                    "Windows 实时字幕尚未准备好，请完成首次语言确认后重试",
+                CaptureStartupStage.ReadingBaseline =>
+                    "无法读取开麦前的字幕窗口，未使用空基线，请重新连接后重试",
+                CaptureStartupStage.CreatingSession =>
+                    "无法创建本次课堂，现有课堂数据未被清除",
+                CaptureStartupStage.ActivatingInput =>
+                    "麦克风未成功开启，请检查系统麦克风状态后重试",
+                CaptureStartupStage.RebindingCaptionSource =>
+                    "麦克风已切换，但字幕节点尚不可读取，请重试",
+                CaptureStartupStage.ResumingCapture =>
+                    "本次启动已被新的课堂操作替代，请重试",
+                _ => "课堂启动失败，可安全重试"
+            };
+            return result.RollbackSucceeded
+                ? message
+                : $"{message}；空课堂清理未完成，请在课堂回顾中检查";
         }
 
         private static async Task RestoreLiveCaptionsForMicrophoneControlAsync(
-            System.Windows.Automation.AutomationElement liveCaptionsWindow)
+            System.Windows.Automation.AutomationElement liveCaptionsWindow,
+            CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             LiveCaptionsHandler.RestoreLiveCaptions(liveCaptionsWindow);
-            await Task.Delay(400);
+            await Task.Delay(400, token);
         }
 
-        private async Task RunModeTransitionAsync(Func<Task> transition)
+        private async Task RunModeTransitionAsync(
+            Func<CancellationToken, Task> transition)
         {
-            if (!await modeTransitionGate.WaitAsync(0))
-                return;
+            var request = new CancellationTokenSource();
+            CancellationTokenSource? previous = Interlocked.Exchange(
+                ref modeTransitionCancellation,
+                request);
+            previous?.Cancel();
+            bool entered = false;
 
-            viewModel.IsModeTransitioning = true;
             try
             {
-                await transition();
+                await modeTransitionGate.WaitAsync(request.Token);
+                entered = true;
+                if (!ReferenceEquals(modeTransitionCancellation, request))
+                    return;
+
+                viewModel.IsModeTransitioning = true;
+                await transition(request.Token);
+            }
+            catch (OperationCanceledException) when (request.IsCancellationRequested)
+            {
             }
             catch (Exception exception)
             {
@@ -816,8 +1018,14 @@ namespace LiveCaptionsTranslator
             }
             finally
             {
-                viewModel.IsModeTransitioning = false;
-                modeTransitionGate.Release();
+                if (entered)
+                    modeTransitionGate.Release();
+                if (ReferenceEquals(modeTransitionCancellation, request))
+                {
+                    modeTransitionCancellation = null;
+                    viewModel.IsModeTransitioning = false;
+                }
+                request.Dispose();
             }
         }
 

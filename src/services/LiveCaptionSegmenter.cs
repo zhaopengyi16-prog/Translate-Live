@@ -59,9 +59,9 @@ namespace LiveCaptionsTranslator.services
         public const int RecentSnapshotCapacity = 16;
         public const int PendingCandidateCapacity = 8;
 
-        // Live Captions can temporarily punctuate a short phrase and then
-        // continue or shorten it. Position, lexical boundaries, and this small
-        // evidence window allow correction without delaying translation.
+        // Live Captions can temporarily shorten a short punctuated phrase.
+        // Rollback requires a small evidence window; strict forward growth
+        // keeps identity while the bounded sentence ledger still exists.
         public static readonly TimeSpan ShortTailRevisionWindow =
             TimeSpan.FromSeconds(4);
         public const int ShortTailMinimumLatinWords = 3;
@@ -280,10 +280,21 @@ namespace LiveCaptionsTranslator.services
         {
             lock (stateLock)
             {
-                PruneRecentSegments(observedAt);
                 string normalized = TextUtil.NormalizeCaptionWhitespace(rawText);
                 if (normalized.Length == 0)
+                {
+                    PruneRecentSegments(observedAt);
                     return BuildUpdate(normalized, [], observedAt);
+                }
+
+                if (string.Equals(normalized, previousSnapshot, StringComparison.Ordinal))
+                {
+                    TouchVisibleEvidence(observedAt);
+                    PruneRecentSegments(observedAt);
+                    return BuildUpdate(normalized, [], observedAt);
+                }
+
+                PruneRecentSegments(observedAt);
 
                 // UI Automation can clip the beginning of its first visible
                 // sentence. Repair that physical window edge before splitting;
@@ -298,9 +309,6 @@ namespace LiveCaptionsTranslator.services
                     previousSnapshot = normalized;
                     return BuildUpdate(normalized, [], observedAt);
                 }
-
-                if (string.Equals(normalized, previousSnapshot, StringComparison.Ordinal))
-                    return BuildUpdate(normalized, [], observedAt);
 
                 if (IsHistoricalTailDraftRollback(
                         completed,
@@ -456,6 +464,18 @@ namespace LiveCaptionsTranslator.services
                         activeDraft = null;
                         activeDraftEligible = false;
                     }
+                    else if (TryCollapseAdjacentFrontierRevision(
+                                 candidate,
+                                 index,
+                                 completed.Count,
+                                 currentCompleted,
+                                 observedAt,
+                                 out LiveCaptionSegment revisedFrontier))
+                    {
+                        finalized.Add(revisedFrontier);
+                        lastFinal = revisedFrontier;
+                        continue;
+                    }
                     else if (index < alignmentLimit &&
                              HasResolvedWindowContentAfter(
                                  resolvedCompleted,
@@ -471,7 +491,6 @@ namespace LiveCaptionsTranslator.services
                     }
                     else if (TryHoldAmbiguousHistoricalCandidate(
                                  candidate,
-                                 currentCompleted,
                                  observedAt))
                     {
                         continue;
@@ -482,7 +501,12 @@ namespace LiveCaptionsTranslator.services
                         ResolvePendingAsWindowReplay(currentCompleted);
                     }
 
-                    currentCompleted.Add(segment);
+                    int existingIdentityIndex = currentCompleted.FindIndex(
+                        existing => existing.Id == segment.Id);
+                    if (existingIdentityIndex >= 0)
+                        currentCompleted[existingIdentityIndex] = segment;
+                    else
+                        currentCompleted.Add(segment);
                     finalized.Add(segment);
                     lastFinal = segment;
                     RegisterRecentSegment(segment, observedAt);
@@ -959,7 +983,6 @@ namespace LiveCaptionsTranslator.services
 
         private bool TryHoldAmbiguousHistoricalCandidate(
             string candidate,
-            IReadOnlyList<LiveCaptionSegment> currentCompleted,
             DateTimeOffset observedAt)
         {
             // Deterministic reading units from one long unpunctuated snapshot
@@ -975,42 +998,14 @@ namespace LiveCaptionsTranslator.services
                 .OrderByDescending(entry => entry.LastSeenAt)
                 .ThenByDescending(entry => entry.Segment.Sequence)
                 .FirstOrDefault();
-            if (historical == null ||
-                HasTrustedRightEdgeAppendEvidence(
-                    currentCompleted,
-                    historical.Segment.Id))
-            {
+            if (historical == null)
                 return false;
-            }
 
             RememberPendingCandidate(
                 candidate,
                 historical.Segment.Id,
                 observedAt);
             historical.MarkSeen(observedAt);
-            return true;
-        }
-
-        private bool HasTrustedRightEdgeAppendEvidence(
-            IReadOnlyList<LiveCaptionSegment> currentCompleted,
-            Guid repeatedHistoricalId)
-        {
-            RecentSnapshotEntry? previous = recentSnapshots.LastOrDefault();
-            if (previous == null ||
-                previous.CompletedSegmentIds.Count < 2 ||
-                currentCompleted.Count != previous.CompletedSegmentIds.Count ||
-                currentCompleted[^1].Id == repeatedHistoricalId)
-            {
-                return false;
-            }
-
-            for (int index = 0;
-                 index < previous.CompletedSegmentIds.Count;
-                 index++)
-            {
-                if (previous.CompletedSegmentIds[index] != currentCompleted[index].Id)
-                    return false;
-            }
             return true;
         }
 
@@ -1226,8 +1221,8 @@ namespace LiveCaptionsTranslator.services
         private void PruneRecentSegments(DateTimeOffset observedAt)
         {
             recentSegments.RemoveAll(entry =>
-                observedAt >= entry.LastForwardObservedAt &&
-                observedAt - entry.LastForwardObservedAt >
+                observedAt >= entry.LastSeenAt &&
+                observedAt - entry.LastSeenAt >
                     LiveCaptionSegmentationThresholds.RecentLedgerRetention);
             recentSnapshots.RemoveAll(snapshot =>
                 observedAt >= snapshot.ObservedAt &&
@@ -1237,6 +1232,21 @@ namespace LiveCaptionsTranslator.services
                 observedAt >= candidate.LastObservedAt &&
                 observedAt - candidate.LastObservedAt >
                     LiveCaptionSegmentationThresholds.RecentLedgerRetention);
+        }
+
+        private void TouchVisibleEvidence(DateTimeOffset observedAt)
+        {
+            foreach (LiveCaptionSegment segment in previousCompleted)
+            {
+                recentSegments.FirstOrDefault(
+                    entry => entry.Segment.Id == segment.Id)?.MarkSeen(observedAt);
+            }
+
+            if (activeDraft != null)
+            {
+                recentSegments.FirstOrDefault(
+                    entry => entry.Segment.Id == activeDraft.Id)?.MarkSeen(observedAt);
+            }
         }
 
         private void RememberSnapshot(DateTimeOffset observedAt)
@@ -1335,9 +1345,28 @@ namespace LiveCaptionsTranslator.services
                     return;
                 }
 
+                LiveCaptionSegment? visibleFrontierContinuation =
+                    TryReopenVisibleFrontierRevision(
+                        observedDraft,
+                        observedAt);
+                if (visibleFrontierContinuation != null)
+                {
+                    activeDraft = visibleFrontierContinuation;
+                    activeDraftChangedAt = observedAt;
+                    activeDraftEligible = true;
+                    return;
+                }
+
+                if (TryHoldAmbiguousHistoricalDraftCandidate(
+                        observedDraft,
+                        observedAt))
+                {
+                    return;
+                }
+
                 // Temporary terminal punctuation can disappear as the same
-                // tail continues. Explicit appended drafts and new short-prefix
-                // utterances must still receive their own identity.
+                // tail continues. A retained pending draft trajectory still
+                // establishes a separately repeated utterance.
                 RecentSegmentEntry? continuationEntry = null;
                 if (canContinueFinal &&
                     lastFinal != null)
@@ -1351,11 +1380,7 @@ namespace LiveCaptionsTranslator.services
                     NormalizeLexicalText(observedDraft).Length >
                         NormalizeLexicalText(lastFinal.Text).Length &&
                     (IsLongLexicalPrefixRevision(lastFinal.Text, observedDraft) ||
-                     IsRecentShortTailGrowth(
-                         continuationEntry,
-                         lastFinal.Text,
-                         observedDraft,
-                         observedAt));
+                     IsShortTailGrowth(lastFinal.Text, observedDraft));
                 if (continuesFinal)
                 {
                     LiveCaptionSegment previousFinal = lastFinal!;
@@ -1444,6 +1469,55 @@ namespace LiveCaptionsTranslator.services
                 entry.IsCurrentText(text) || entry.IsHistoricalRevision(text));
         }
 
+        private bool TryHoldAmbiguousHistoricalDraftCandidate(
+            string observedDraft,
+            DateTimeOffset observedAt)
+        {
+            RecentSegmentEntry? historical = recentSegments
+                .Where(entry =>
+                    entry.IsCurrentText(observedDraft) ||
+                    entry.IsHistoricalRevision(observedDraft))
+                .OrderByDescending(entry => lastFinal?.Id == entry.Segment.Id)
+                .ThenByDescending(entry => entry.LastSeenAt)
+                .ThenByDescending(entry => entry.Segment.Sequence)
+                .FirstOrDefault();
+            if (historical == null)
+                return false;
+
+            RememberPendingCandidate(
+                observedDraft,
+                historical.Segment.Id,
+                observedAt);
+            historical.MarkSeen(observedAt);
+            return true;
+        }
+
+        private LiveCaptionSegment? TryReopenVisibleFrontierRevision(
+            string observedDraft,
+            DateTimeOffset observedAt)
+        {
+            if (lastFinal == null ||
+                !previousCompleted.Any(segment => segment.Id == lastFinal.Id) ||
+                !IsStrictLexicalGrowth(lastFinal.Text, observedDraft))
+            {
+                return null;
+            }
+
+            RecentSegmentEntry? entry = recentSegments.FirstOrDefault(
+                candidate => candidate.Segment.Id == lastFinal.Id);
+            if (entry == null)
+                return null;
+
+            LiveCaptionSegment reopened = lastFinal with
+            {
+                Revision = lastFinal.Revision + 1,
+                Text = observedDraft,
+                IsFinal = false
+            };
+            entry.RememberRevisionText(observedDraft, observedAt);
+            return reopened;
+        }
+
         private bool IsHistoricalTailDraftRollback(
             IReadOnlyList<string> completed,
             string observedDraft,
@@ -1475,20 +1549,49 @@ namespace LiveCaptionsTranslator.services
             return true;
         }
 
-        private static bool IsRecentShortTailGrowth(
-            RecentSegmentEntry entry,
+        private static bool IsShortTailGrowth(
             string previous,
-            string current,
-            DateTimeOffset observedAt)
+            string current)
         {
-            if (!IsInsideShortTailRevisionWindow(entry, observedAt))
-                return false;
-
             string left = NormalizeLexicalText(previous);
             string right = NormalizeLexicalText(current);
             return right.Length > left.Length &&
                    HasShortTailEvidence(left) &&
                    IsLexicalPrefixAtBoundary(right, left);
+        }
+
+        private bool TryCollapseAdjacentFrontierRevision(
+            string candidate,
+            int candidateIndex,
+            int completedCount,
+            List<LiveCaptionSegment> currentCompleted,
+            DateTimeOffset observedAt,
+            out LiveCaptionSegment revised)
+        {
+            revised = null!;
+            if (candidateIndex != completedCount - 1 ||
+                currentCompleted.Count == 0 ||
+                lastFinal == null)
+            {
+                return false;
+            }
+
+            LiveCaptionSegment visibleFrontier = currentCompleted[^1];
+            bool existedInPreviousWindow = previousCompleted.Any(
+                segment => segment.Id == visibleFrontier.Id);
+            if (!existedInPreviousWindow ||
+                visibleFrontier.Id != lastFinal.Id ||
+                !IsStrictLexicalGrowth(visibleFrontier.Text, candidate))
+            {
+                return false;
+            }
+
+            revised = ApplyRecentRevision(
+                visibleFrontier,
+                candidate,
+                observedAt);
+            currentCompleted[^1] = revised;
+            return true;
         }
 
         private static bool IsRecentShortTailRollback(

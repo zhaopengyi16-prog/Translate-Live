@@ -3,6 +3,14 @@ using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator.services
 {
+    internal enum EmptySessionAbortResult
+    {
+        NotCurrent,
+        Deleted,
+        PreservedWithRecords,
+        EndedAfterDeleteFailure
+    }
+
     public static class LectureSessionTracker
     {
         private static readonly SemaphoreSlim sessionGate = new(1, 1);
@@ -57,6 +65,52 @@ namespace LiveCaptionsTranslator.services
                     await SQLiteHistoryLogger.EndSessionAsync(id, summaryText, token);
                     Interlocked.Exchange(ref currentSessionId, 0);
                 }
+            }
+            finally
+            {
+                sessionGate.Release();
+            }
+        }
+
+        internal static async Task<EmptySessionAbortResult> AbortCurrentIfEmptyAsync(
+            long expectedSessionId,
+            CancellationToken token = default)
+        {
+            await sessionGate.WaitAsync(token);
+            try
+            {
+                long currentId = Interlocked.Read(ref currentSessionId);
+                if (currentId != expectedSessionId)
+                    return EmptySessionAbortResult.NotCurrent;
+
+                var history = await SQLiteHistoryLogger.LoadSessionHistoryAsync(
+                    expectedSessionId,
+                    token: token);
+                if (history.Count > 0)
+                {
+                    await SQLiteHistoryLogger.EndSessionAsync(
+                        expectedSessionId,
+                        null,
+                        token);
+                    Interlocked.Exchange(ref currentSessionId, 0);
+                    return EmptySessionAbortResult.PreservedWithRecords;
+                }
+
+                bool deleted = await SQLiteHistoryLogger.DeleteSessionAsync(
+                    expectedSessionId,
+                    token);
+                if (deleted)
+                {
+                    Interlocked.Exchange(ref currentSessionId, 0);
+                    return EmptySessionAbortResult.Deleted;
+                }
+
+                await SQLiteHistoryLogger.EndSessionAsync(
+                    expectedSessionId,
+                    null,
+                    token);
+                Interlocked.Exchange(ref currentSessionId, 0);
+                return EmptySessionAbortResult.EndedAfterDeleteFailure;
             }
             finally
             {

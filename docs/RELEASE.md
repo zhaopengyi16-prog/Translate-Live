@@ -8,6 +8,47 @@ The repository is ready for public source review. It does not yet claim a signed
 
 Current public version: `0.1.0.0`
 
+### Caption replay amplification fix (working tree based on `9b669670`)
+
+The current classroom database was inspected read-only using counts and text-shape relationships only; no caption text or credential was printed. The newest completed classroom contained no byte-identical source rows, but 20 of 33 rows belonged to seven near-revision clusters. This showed that progressive recognizer versions were acquiring new logical identities before they reached translation, WPF projection and SQLite.
+
+The source review found four independent amplification paths in `LiveCaptionSegmenter`: an old sentence copied to the physical right edge was treated as trusted new speech; a final alternating between completed and draft forms could create a fresh identity on every cycle; strict short-tail growth after four seconds was declared new speech; and an unchanged but still-visible window did not refresh the retention evidence used by the recent identity ledger. A fifth pattern exposed adjacent old/new final rows for one progressive utterance. The repair removes right-edge placement as proof of a repeat, holds text-only repeats as bounded pending candidates, reuses the retained frontier for direct strict growth, collapses an adjacent strict-growth revision into that frontier, refreshes visible ledger evidence, and keeps `SegmentId`, `Sequence` and `CapturedAt` stable. A genuine repeat that establishes a new short-draft trajectory remains a separate identity.
+
+Verification on a normal Windows x64 desktop with SDK 10.0.400 and isolated test data:
+
+- before the repair, the completed/draft/final loop for one sentence produced **21 distinct identities** in 20 cycles; after the repair, the 40-cycle production-chain replay finishes with **1 identity / 1 provider request / 1 workspace row / 1 SQLite row**;
+- all four initial failure tests failed before the code change and now pass: copied right-edge final, visible-ledger expiry, delayed short-tail growth, and adjacent progressive finals;
+- an alternating two-voice synthetic replay with rolling-window rotations, controlled provider delays and 100 unchanged frames finishes with **12 identities / 12 requests / 12 workspace rows / 12 SQLite rows**;
+- the full solution test run passes **256 tests, 0 failed, 0 skipped**;
+- locked restore and Release build pass with **0 errors** and 304 existing nullable warnings;
+- the real WPF timeline smoke passes follow cancellation, reading-anchor preservation, draft height, final visibility, font/resize and return-to-live checks;
+- the Windows `--multi-voice-audio` smoke used two installed SAPI voices with a 300 ms overlap. Live Captions exposed 20 changed snapshots and 9 accepted revision events under 4 logical identities; microphone Off → On, caption-node rebind, restoration to Off and process cleanup all passed. Recognition merged some of the six intended spoken sentences, so this run validates non-amplifying identity behavior rather than ASR transcription accuracy;
+- the published executable reached `startup.ui-ready` from the current output directory, accepted a normal window close, exited with code 0, removed its recovery marker and left no app-owned process;
+- self-contained uncompressed win-x64 output: **409 files, 155,614,306 bytes** in `artifacts/dev-win-x64`;
+- entry executable SHA-256: `d5ebb91eb427cdb12dcb079659e94ab31ff362be1130ff1d5b2f7f1beaf18cfb`;
+- application assembly SHA-256: `dfe74b6b2f342adb4ed24a862471a063ad1b60a4b4c0ab5032f7319aabc71abf`.
+
+The repair does not rewrite or text-deduplicate existing classroom history. Windows Live Captions still supplies flattened text without a native occurrence identifier, so an isolated same-text repeat with no draft trajectory remains intentionally pending instead of being guessed as either new speech or replay.
+
+### First microphone caption startup fix (working tree based on `9b669670`)
+
+The earlier classroom flow enabled the microphone and then called the general reset/resume path. `LiveCaptionSegmenter.Reset()` intentionally treats its next non-empty snapshot as an old-window seed, so the first microphone sentence was suppressed when it was the first snapshot after that second reset. The startup flow now captures the readable Live Captions baseline before changing the input, prepares the new capture epoch and classroom once, rebinds the caption node after the Windows microphone operation, and resumes without another reset. A second startup defect was found during Windows verification: on a fresh ready surface Windows may not create `CaptionsTextBlock` until speech occurs, so the baseline reader reported `captions-node-unavailable` and stopped before microphone activation. Readiness now uses positive shell evidence to classify that exact state as a confirmed empty baseline while preserving failures for preparation prompts, missing controls, stale nodes and UI Automation errors.
+
+Verified on a normal Windows x64 desktop with .NET SDK 10.0.400 and `LECTURE_COPILOT_DATA_ROOT` set to a new temporary directory:
+
+- the original first-sentence regression failed because the first post-enable snapshot produced zero segments; the repaired startup and production-chain regressions pass for an immediate first sentence, a long pause, a following second sentence, old visible text, an already-active microphone, mode switching, node rebuild, bounded failure, cancellation and late callbacks;
+- the empty-surface Windows regression failed before the latest change with `PreSpeechBaselineReadable=False` and `captions-node-unavailable`; after the change the same pre-speech step reports `ConfirmedEmptySurface`, readable and empty, before any generated caption;
+- locked restore and the full solution Release build succeeded with **0 errors**; the incremental verification build emitted **152 existing warnings**;
+- the full Windows test project passed **250 tests, 0 failed, 0 skipped**, including five surface-readiness classifications;
+- the real WPF timeline smoke passed queued-follow cancellation, reading-anchor preservation after height change, bounded draft height, live/final visibility, font/resize handling and return-to-live;
+- the Live Captions desktop smoke began with no caption text node, confirmed the empty ready surface, detected fixed non-personal system speech (**0 to 50 caption characters**), changed the microphone **Off → On**, successfully rebound and read the post-enable caption node, restored it to **Off**, and confirmed process cleanup;
+- the published executable reached `startup.ui-ready` from the path below, accepted a normal window close, exited with code 0, left no shutdown-recovery marker, and left no app-owned Translate Live or Live Captions process;
+- self-contained win-x64 output: **409 files, 155,611,018 bytes** in `artifacts/dev-win-x64`;
+- entry executable SHA-256: `d5ebb91eb427cdb12dcb079659e94ab31ff362be1130ff1d5b2f7f1beaf18cfb`.
+- application assembly SHA-256: `03b278c7ab8abf1110e3c83d94767c9478e2d87bf4743c7e2095d5759e5222d4`.
+
+The physical spoken-microphone scenario was not executed automatically: the available automation surface cannot provide or verify a real microphone waveform. The Windows smoke proves the OS toggle and rebuilt caption node, while the deterministic production replay proves the post-enable first snapshot, identity, timeline and isolated SQLite behavior. A person must still perform the short spoken check before treating this as a generally available binary release.
+
 ### Caption recording preview (after `430df950`)
 
 This patch separates the fixed live-caption surface from complete classroom records. See [source review](SOURCE_REVIEW_2026-09-14.md) for root causes, remaining findings and limitations.
@@ -60,16 +101,16 @@ Final-to-draft continuity regression evidence:
 
 - final → punctuationless growing draft → final retains one `SegmentId`, `Sequence`, and `CapturedAt` while advancing the revision;
 - replaying recent intermediate drafts or the same tail with punctuation removed emits no new draft or final event and leaves the latest segment unchanged;
-- an explicit appended sentence remains a new identity, and an identical utterance that starts from a new short draft is retained as a genuine repeat;
+- a textually distinct appended sentence remains a new identity, while an identical or prefix-growing utterance is retained as a genuine repeat only after it establishes a new short-draft trajectory;
 - the production segmenter, revision-aware queue, workspace view model, and isolated SQLite repository pass with and without intermediate punctuationless drafts;
 - existing classroom rows are not rewritten or deduplicated by this change.
 
 Rapid-continuity regression evidence:
 
 - before the short-tail fix, `And you know? → And you know what → And you know what?` created a second identity, while `Can him remind your voice? → Can him remind your → original final` created a new draft that finalized as a duplicate;
-- a four-second, position-supported lexical-prefix window now keeps those recognizer revisions on the current identity without adding translation latency;
+- strict lexical-prefix growth now keeps the retained frontier identity without using elapsed time as evidence of new speech; the four-second threshold remains only for conservative short-tail rollback;
 - a rapid 13-frame continuous-speech replay covering provisional punctuation, temporary shortening, restoration, and long growth finishes with one identity, its first capture time, one workspace row, and one isolated SQLite row;
-- appended different sentences, repeated speech that begins from a new short draft, and short-prefix growth outside the evidence window remain separate identities.
+- appended different sentences and repeated speech that begins from a new short draft remain separate identities; delayed strict growth of the retained frontier stays on that frontier.
 
 Whole-window identity regression evidence:
 
@@ -77,7 +118,7 @@ Whole-window identity regression evidence:
 - the repaired replay first aligns the complete accessibility window and finishes with exactly three identities, three requests, three workspace rows, and three SQLite rows (`4/4/4/4 -> 3/3/3/3`);
 - repeated rotation in either direction, head truncation, and historical revisions reuse their existing occurrence identities one-to-one; two genuinely established equal utterances remain two identities when the window later reorders;
 - a punctuation-finalized current sentence that reappears without punctuation and keeps growing retains its original `SegmentId`, `Sequence`, and `CapturedAt`, including when older completed rows remain visible;
-- an isolated `A -> B -> A` without a draft trajectory or trusted append position is held as a bounded pending candidate. Waiting alone never promotes it; strict draft growth can establish a new occurrence with the pending candidate's first observation time, while expired evidence closes without emitting speech;
+- an isolated `A -> B -> A` or copied right-edge `A` without a draft trajectory is held as a bounded pending candidate. Waiting or right-edge placement alone never promotes it; strict growth from that pending trajectory can establish a new occurrence with its first observation time, while expired evidence closes without emitting speech;
 - the final-admission gate now validates only resolved `SegmentId` and `Revision`. It no longer creates text aliases or uses a three-second timeout, intervening text, or revision number as a second identity classifier;
 - Unicode direction and zero-width format marks exposed by UI Automation do not change normalized caption identity text, and no fixed delay is added before ordinary final captions are submitted.
 
@@ -151,6 +192,7 @@ Targeted desktop commands after a Release build:
 ~~~powershell
 $env:LECTURE_COPILOT_DATA_ROOT = Join-Path $env:TEMP ("TranslateLive-Smoke-" + [guid]::NewGuid().ToString("N"))
 tests/LiveCaptionsTranslator.SmokeTests/bin/Release/net10.0-windows/LiveCaptionsTranslator.SmokeTests.exe --system-audio
+tests/LiveCaptionsTranslator.SmokeTests/bin/Release/net10.0-windows/LiveCaptionsTranslator.SmokeTests.exe --multi-voice-audio
 tests/LiveCaptionsTranslator.SmokeTests/bin/Release/net10.0-windows/LiveCaptionsTranslator.SmokeTests.exe --timeline-ui
 ~~~
 
